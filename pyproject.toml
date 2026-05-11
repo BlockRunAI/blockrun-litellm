@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blockrun-litellm"
+version = "0.1.0"
+description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "BlockRun", email = "hello@blockrun.ai" }
+]
+keywords = ["litellm", "blockrun", "x402", "openai", "llm-proxy", "openrouter", "ai-gateway"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "blockrun-llm>=0.19.0",
+    "litellm>=1.40.0",
+]
+
+[project.optional-dependencies]
+proxy = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+blockrun-litellm-proxy = "blockrun_litellm.proxy:main"
+
+[project.urls]
+Homepage = "https://blockrun.ai"
+Repository = "https://github.com/BlockRunAI/blockrun-litellm"
+Documentation = "https://github.com/BlockRunAI/blockrun-litellm#readme"
+
+[tool.hatch.build.targets.wheel]
+packages = ["blockrun_litellm"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
