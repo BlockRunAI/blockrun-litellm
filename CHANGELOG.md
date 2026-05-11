@@ -24,7 +24,7 @@ GitHub at [BlockRunAI/blockrun-litellm](https://github.com/BlockRunAI/blockrun-l
 - Bilingual README (English + 中文).
 
 ### Known limitations
-- **Streaming (`stream=True`) is not supported** — surfaces as HTTP 400. SSE support tracks the upstream `blockrun-llm` SDK.
+- **Streaming (`stream=True`) is not wired in this adapter** — surfaces as HTTP 400. The BlockRun gateway itself fully supports SSE (`text/event-stream`) for both free and paid models; the gap is on the `blockrun-llm` SDK client side, which this adapter wraps. Earlier copy in this file blamed "x402 per-request settlement" — that was wrong, x402 is orthogonal to SSE.
 - During e2e the pydantic serializer emits a warning that LiteLLM's `Message` model expects 9 fields and BlockRun returns 5 (extras like `function_call`, `audio`, `annotations` are absent). Functionally harmless — LiteLLM fills defaults — but apps with strict pydantic validation may want to suppress the warning.
 - **Solana wallet path not wired** — Base only for v0.1. Solana support will land alongside `SolanaLLMClient` integration.
 - Image / video / music generation endpoints are not exposed by the proxy yet; only `/v1/chat/completions`.

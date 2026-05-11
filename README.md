@@ -246,7 +246,7 @@ All of these are forwarded to BlockRun unchanged:
 | `temperature` | ✅ | 0–2 |
 | `top_p` | ✅ | |
 | `tools` / `tool_choice` | ✅ | Function calling |
-| `stream` | ❌ | **Not yet supported** — fails fast with HTTP 400. Track [blockrun-llm](https://github.com/BlockRunAI/blockrun-llm) for SSE support. |
+| `stream` | ❌ | **Not yet wired in this adapter** — fails fast with HTTP 400. The BlockRun gateway itself fully supports SSE (`text/event-stream`); the gap is on the `blockrun-llm` SDK client side. Targeting v0.2.0. |
 | `frequency_penalty` / `presence_penalty` / `logprobs` / `n` | ⚠️ | Silently dropped — enable `litellm_settings.drop_params: True` to suppress LiteLLM warnings |
 
 BlockRun-specific extras (also accepted):
@@ -298,7 +298,7 @@ The `examples/` directory has copy-paste-ready snippets:
 ## FAQ
 
 **Q: Does this support streaming?**
-Not yet. BlockRun's x402 settlement is per-request; SSE support is on the `blockrun-llm` roadmap. Set `stream=False` (or omit it) for now.
+Not yet — but the limitation is on the SDK client side, not the gateway. BlockRun's `/v1/chat/completions` already serves SSE (`text/event-stream`) for both free and paid models. What's missing is SSE parsing in the `blockrun-llm` Python SDK that this adapter wraps; once that lands (or once this adapter starts hitting the gateway directly for streaming), `stream=True` will work end-to-end. Set `stream=False` (or omit it) for now.
 
 **Q: Where does my private key live?**
 On your machine only — `BLOCKRUN_WALLET_KEY` env var, or `~/.blockrun/.session` if you used `setup_agent_wallet()`. The proxy and provider both read from those sources via `blockrun-llm`. Only EIP-712 signatures are transmitted.
@@ -429,7 +429,7 @@ resp = client.chat.completions.create(
 |---|---|---|
 | `model` / `messages` / `max_tokens` / `temperature` / `top_p` | ✅ | |
 | `tools` / `tool_choice` | ✅ | 函数调用 |
-| `stream` | ❌ | **暂未支持**，请求会直接 400。SSE 支持跟随 [blockrun-llm](https://github.com/BlockRunAI/blockrun-llm) 路线图。 |
+| `stream` | ❌ | **本适配层暂未接通流式**，请求会直接 400。**BlockRun 后端 `/v1/chat/completions` 本身完全支持 SSE**（`text/event-stream`，免费/付费模型都支持），缺口在 [`blockrun-llm`](https://github.com/BlockRunAI/blockrun-llm) Python SDK 的客户端 SSE 解析。计划 v0.2.0 补齐。 |
 | `frequency_penalty` / `presence_penalty` / `logprobs` / `n` | ⚠️ | 静默丢弃 —— 建议 LiteLLM 配 `drop_params: True` 抑制告警 |
 
 BlockRun 额外参数：
@@ -443,7 +443,7 @@ BlockRun 额外参数：
 ## 常见问题
 
 **Q：支持流式吗？**
-暂时不支持。BlockRun 是按次结算的，SSE 在 `blockrun-llm` 路线图上。先用 `stream=False`。
+本适配层暂未接通，但**限制不在协议层**——BlockRun 后端 `/v1/chat/completions` 早就跑着 SSE（免费 tier 和付费 tier 都是流式返回 `text/event-stream`）。缺口在 `blockrun-llm` Python SDK 还没实现客户端 SSE 解析。SDK 那边补上、或本适配层直接绕开 SDK 自己处理 SSE 之后，`stream=True` 就能端到端跑通。当前先用 `stream=False`。
 
 **Q：私钥放哪？**
 只在本地 —— `BLOCKRUN_WALLET_KEY` 环境变量，或 `setup_agent_wallet()` 创建的 `~/.blockrun/.session`。Provider 和 Proxy 都通过 `blockrun-llm` 读取。链上只看到签名，看不到私钥。
