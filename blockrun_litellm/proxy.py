@@ -152,7 +152,7 @@ def main() -> None:
     parser.add_argument(
         "--api-url",
         default=None,
-        help="Override BlockRun API URL (e.g. https://testnet.blockrun.ai/api)",
+        help="Override BlockRun API URL (default: https://blockrun.ai/api)",
     )
     parser.add_argument(
         "--log-level",

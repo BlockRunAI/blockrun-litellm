@@ -47,7 +47,7 @@ python -c "from blockrun_llm import setup_agent_wallet; setup_agent_wallet()"
 # Option C — pass per-call (Python lib mode), see examples below
 ```
 
-Need testnet? Set `BLOCKRUN_API_URL=https://testnet.blockrun.ai/api` (Base Sepolia, free test USDC).
+> 💡 To validate without spending real USDC, use a free model like `nvidia/deepseek-v4-flash` — same code path, same wallet flow, $0 settlement.
 
 ---
 
@@ -87,7 +87,6 @@ response = litellm.completion(
     model="blockrun/openai/gpt-5.5",
     messages=[...],
     api_key="0xANOTHER_PRIVATE_KEY",          # passed to blockrun-llm as wallet
-    api_base="https://testnet.blockrun.ai/api",  # optional testnet override
 )
 ```
 
@@ -126,7 +125,7 @@ Flags:
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind interface. **Keep loopback** unless you set `BLOCKRUN_PROXY_TOKEN`. |
 | `--port` | `4001` | Bind port |
-| `--api-url` | `https://blockrun.ai/api` | Override BlockRun gateway (e.g. testnet) |
+| `--api-url` | `https://blockrun.ai/api` | Override BlockRun gateway endpoint |
 | `--log-level` | `info` | `critical`/`error`/`warning`/`info`/`debug`/`trace` |
 
 Optional shared-secret guard:
@@ -345,7 +344,7 @@ python -c "from blockrun_llm import setup_agent_wallet; setup_agent_wallet()"
 
 私钥**只在本地用于 EIP-712 签名**，永远不会离开你的机器。
 
-要用测试网：`export BLOCKRUN_API_URL=https://testnet.blockrun.ai/api`（Base Sepolia，免费测试 USDC）。
+> 💡 想零成本试一遍？用免费模型 `nvidia/deepseek-v4-flash` —— 代码完全一样，钱包流程一样，结算 $0。
 
 ### 模式 1：自定义 Provider
 

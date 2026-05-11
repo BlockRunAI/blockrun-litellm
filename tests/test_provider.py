@@ -59,9 +59,9 @@ def test_api_base_and_api_key_forwarded(stub_sync_client, monkeypatch) -> None:
     handler.completion(
         model="openai/gpt-5.5",
         messages=[{"role": "user", "content": "hi"}],
-        api_base="https://testnet.blockrun.ai/api",
+        api_base="https://gateway.example.test/api",
         api_key="0xDEADBEEF" + "00" * 28,
     )
 
-    assert captured["api_url"] == "https://testnet.blockrun.ai/api"
+    assert captured["api_url"] == "https://gateway.example.test/api"
     assert captured["private_key"].startswith("0xDEADBEEF")
