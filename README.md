@@ -1,5 +1,9 @@
 # blockrun-litellm
 
+[![PyPI](https://img.shields.io/pypi/v/blockrun-litellm.svg)](https://pypi.org/project/blockrun-litellm/)
+[![Python](https://img.shields.io/pypi/pyversions/blockrun-litellm.svg)](https://pypi.org/project/blockrun-litellm/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code.
 
 > **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. The only thing that differs is *authentication*: BlockRun uses per-request x402 wallet signatures (non-custodial USDC micropayments on Base / Solana), not a Bearer API key. This package bridges that gap.
@@ -16,6 +20,28 @@ LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models
 | **2. Local proxy** (sidecar) | Apps using the LiteLLM **Proxy Server** (or any OpenAI client) | `api_base="http://localhost:4001/v1"` |
 
 Both modes share the same underlying wallet/signing flow (via the [`blockrun-llm`](https://github.com/BlockRunAI/blockrun-llm) SDK), so they behave identically. Pick whichever fits your deployment.
+
+### Verified end-to-end against the live BlockRun gateway
+
+Both modes have been validated against `https://blockrun.ai/api` using the free `nvidia/deepseek-v4-flash` model:
+
+```
+$ python -c "
+> import litellm
+> from blockrun_litellm import register; register()
+> r = litellm.completion(
+>     model='blockrun/nvidia/deepseek-v4-flash',
+>     messages=[{'role':'user','content':'Reply with exactly: pong'}],
+>     max_tokens=20, temperature=0.0)
+> print(r.choices[0].message.content)"
+pong
+
+$ curl -sS http://127.0.0.1:4001/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"nvidia/deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: proxy-ok"}]}'
+{"id":"a710c144c68c42f7a319fb93e9b9b5a0","object":"chat.completion","model":"nvidia/deepseek-v4-flash",
+ "choices":[{"index":0,"message":{"role":"assistant","content":"proxy-ok"},...}],"usage":{...}}
+```
 
 ---
 
