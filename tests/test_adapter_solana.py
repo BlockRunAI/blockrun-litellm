@@ -1,0 +1,115 @@
+"""
+Unit tests for the Solana branch in ``_adapter.py``.
+
+Adapter v0.3.0 dispatches between ``LLMClient`` (Base) and
+``SolanaLLMClient`` (Solana) based on ``api_url``. These tests verify:
+
+- ``api_url`` containing ``sol.blockrun.ai`` routes to ``SolanaLLMClient``.
+- A bare or Base-shaped ``api_url`` keeps the default ``LLMClient``.
+- ``tools`` / ``tool_choice`` are silently dropped on the Solana path
+  (the Solana SDK doesn't accept them).
+- Async + Solana raises ``NotImplementedError`` (SDK has no async Solana).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+# The solana extras need to be installed for these tests to make sense; skip
+# the whole module otherwise so CI without [solana] still passes.
+pytest.importorskip("x402")
+pytest.importorskip("solders")
+
+from blockrun_litellm import _adapter
+from blockrun_litellm._adapter import _filter_kwargs, _is_solana_url
+
+
+def test_is_solana_url_recognizes_gateway():
+    assert _is_solana_url("https://sol.blockrun.ai/api") is True
+    assert _is_solana_url("https://sol.blockrun.ai/anything") is True
+
+
+def test_is_solana_url_rejects_base():
+    assert _is_solana_url("https://blockrun.ai/api") is False
+    assert _is_solana_url(None) is False
+    assert _is_solana_url("") is False
+
+
+def test_filter_kwargs_drops_tools_on_solana():
+    raw = {
+        "max_tokens": 64,
+        "temperature": 0.1,
+        "tools": [{"type": "function", "function": {"name": "x"}}],
+        "tool_choice": "auto",
+        "search": True,
+    }
+    out = _filter_kwargs(raw, is_solana=True)
+    assert "tools" not in out
+    assert "tool_choice" not in out
+    assert out["max_tokens"] == 64
+    assert out["search"] is True
+
+
+def test_filter_kwargs_keeps_tools_on_base():
+    raw = {
+        "max_tokens": 64,
+        "tools": [{"type": "function", "function": {"name": "x"}}],
+        "tool_choice": "auto",
+    }
+    out = _filter_kwargs(raw, is_solana=False)
+    assert out["tools"] == raw["tools"]
+    assert out["tool_choice"] == "auto"
+
+
+def test_async_solana_raises_not_implemented():
+    with pytest.raises(NotImplementedError, match="async"):
+        _adapter.get_async_client(api_url="https://sol.blockrun.ai/api")
+
+
+def test_solana_client_routes_through_sync_factory(monkeypatch):
+    """``get_sync_client`` with a Solana ``api_url`` should instantiate a
+    ``SolanaLLMClient``; we patch its constructor to verify the call."""
+    instances: list[Any] = []
+
+    class FakeSolanaClient:
+        def __init__(self, *, private_key=None, api_url=None):
+            instances.append({"private_key": private_key, "api_url": api_url})
+
+    # Reset the module-level cache so the patched class is used.
+    monkeypatch.setattr(_adapter, "_sync_clients", {})
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    client = _adapter.get_sync_client(
+        api_url="https://sol.blockrun.ai/api",
+        private_key="bogus-solana-key",
+    )
+    assert isinstance(client, FakeSolanaClient)
+    assert instances == [
+        {"private_key": "bogus-solana-key", "api_url": "https://sol.blockrun.ai/api"}
+    ]
+
+
+def test_base_client_still_routes_to_llmclient(monkeypatch):
+    """Default / Base ``api_url`` keeps using ``LLMClient`` — making sure
+    the Solana branch didn't accidentally swallow everything."""
+    from blockrun_llm import LLMClient
+
+    monkeypatch.setattr(_adapter, "_sync_clients", {})
+    client = _adapter.get_sync_client(api_url="https://blockrun.ai/api")
+    assert isinstance(client, LLMClient)
+
+
+def test_solana_extras_missing_raises_import_error(monkeypatch):
+    """If a user sets a Solana ``api_url`` without installing the
+    ``[solana]`` extra, we surface a clear ``ImportError`` rather than
+    crashing later in the SDK."""
+    monkeypatch.setattr(_adapter, "_sync_clients", {})
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", False)
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", None)
+
+    with pytest.raises(ImportError, match=r"\[solana\]"):
+        _adapter.get_sync_client(api_url="https://sol.blockrun.ai/api")

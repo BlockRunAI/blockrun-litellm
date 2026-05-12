@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.0 — 2026-05-12
+
+### New
+- **Solana chain support.** The adapter now dispatches to
+  ``SolanaLLMClient`` when ``api_url`` / ``api_base`` points at the
+  Solana gateway (``sol.blockrun.ai``), and to ``LLMClient`` (Base)
+  otherwise. Both modes (Python library + LiteLLM Proxy sidecar)
+  understand both chains.
+
+  ```python
+  # Base (default)
+  litellm.completion(
+      model="blockrun/openai/gpt-5.5",
+      messages=[...],
+      api_key="0xBASE_PRIVATE_KEY",
+  )
+
+  # Solana
+  litellm.completion(
+      model="blockrun/openai/gpt-5.5",
+      messages=[...],
+      api_base="https://sol.blockrun.ai/api",   # ← decides chain
+      api_key="solana-private-key",
+  )
+  ```
+
+- **Streaming on Solana** end-to-end. Requires
+  ``blockrun-llm>=0.21.0`` which adds
+  ``SolanaLLMClient.chat_completion_stream``.
+- ``tools`` / ``tool_choice`` are silently dropped on the Solana path
+  (the Solana SDK doesn't support function calling yet) instead of
+  raising — same UX as LiteLLM's ``drop_params``.
+
+### Constraints
+- **Solana async is not implemented.** ``litellm.acompletion(...)`` with
+  a Solana ``api_base`` raises ``NotImplementedError`` because the SDK
+  has no async Solana client. Use sync, or wrap in
+  ``asyncio.to_thread()``. Roadmap.
+- Solana support requires the optional extra: ``pip install
+  'blockrun-litellm[solana]'`` (pulls the x402 SVM toolchain). A clear
+  ``ImportError`` fires at first call if it's missing.
+
+### Tests
+- 8 new unit tests in ``tests/test_adapter_solana.py`` covering URL
+  recognition, the ``tools`` drop on Solana, async-Solana
+  ``NotImplementedError``, sync routing to ``SolanaLLMClient``, and a
+  clear error when the extra is missing.
+
+### Verified e2e
+- Live ``litellm.completion(api_base="https://sol.blockrun.ai/api",
+  stream=True)`` returned `"Hello! How can I"` over a real Solana
+  wallet (loaded from ``~/.blockrun/.solana-session``).
+
+### Dependency bump
+- ``blockrun-llm>=0.21.0`` (Solana streaming).
+- New ``[solana]`` extra → ``pip install 'blockrun-litellm[solana]'``.
+
 ## 0.2.2 — 2026-05-12
 
 ### New
