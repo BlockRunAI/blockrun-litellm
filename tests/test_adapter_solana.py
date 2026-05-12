@@ -64,9 +64,21 @@ def test_filter_kwargs_keeps_tools_on_base():
     assert out["tool_choice"] == "auto"
 
 
-def test_async_solana_raises_not_implemented():
-    with pytest.raises(NotImplementedError, match="async"):
-        _adapter.get_async_client(api_url="https://sol.blockrun.ai/api")
+def test_async_solana_returns_async_solana_client(monkeypatch):
+    """v0.3.1+: async Solana is supported — should route to
+    :class:`AsyncSolanaLLMClient` (or raise ImportError without [solana])."""
+    from blockrun_llm import AsyncSolanaLLMClient
+    import unittest.mock as mock
+
+    monkeypatch.setattr(_adapter, "_async_clients", {})
+
+    # Patch the constructor so we don't actually init the x402 SDK / signer.
+    with mock.patch.object(AsyncSolanaLLMClient, "__init__", return_value=None):
+        client = _adapter.get_async_client(
+            api_url="https://sol.blockrun.ai/api",
+            private_key="bogus",
+        )
+    assert isinstance(client, AsyncSolanaLLMClient)
 
 
 def test_solana_client_routes_through_sync_factory(monkeypatch):

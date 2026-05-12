@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1 — 2026-05-12
+
+### New
+- **Async Solana is now supported.** ``litellm.acompletion(...)`` and
+  ``litellm.acompletion(stream=True)`` with ``api_base="https://sol.blockrun.ai/api"``
+  no longer raise ``NotImplementedError``. The adapter routes async
+  Solana calls to the new ``AsyncSolanaLLMClient`` introduced in
+  ``blockrun-llm 0.22.0``, completing parity with Base across both
+  sync/async × stream/non-stream.
+
+### Improved
+- **Paid streaming now writes the local cost log + archive.** This is
+  inherited from ``blockrun-llm 0.22.0``: every paid streaming call —
+  Base or Solana, sync or async — produces a row in
+  ``~/.blockrun/cost_log.jsonl`` and a full request/response archive
+  in ``~/.blockrun/data/`` once the stream finishes. Closes the audit
+  gap that streaming had relative to non-streaming.
+
+### Dependency bump
+- ``blockrun-llm>=0.22.0``.
+
+### Verified e2e
+- ``await litellm.acompletion(model="blockrun/nvidia/deepseek-v4-flash",
+  api_base="https://sol.blockrun.ai/api", api_key=solana_key,
+  stream=True)`` returned ``"Hello! How can I"`` — full async Solana
+  stream chain through LiteLLM, first attempt.
+
 ## 0.3.0 — 2026-05-12
 
 ### New

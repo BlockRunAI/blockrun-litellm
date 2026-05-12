@@ -31,12 +31,13 @@ from blockrun_llm import AsyncLLMClient, LLMClient
 from blockrun_llm.types import APIError, ChatCompletionChunk, PaymentError
 
 try:
-    from blockrun_llm import SolanaLLMClient
+    from blockrun_llm import AsyncSolanaLLMClient, SolanaLLMClient
 
     _HAS_SOLANA = True
 except ImportError:
     _HAS_SOLANA = False
     SolanaLLMClient = None  # type: ignore[assignment]
+    AsyncSolanaLLMClient = None  # type: ignore[assignment]
 
 
 # Default endpoints — used to decide chain when no explicit api_url is given.
@@ -107,24 +108,30 @@ def get_sync_client(
 def get_async_client(
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
-) -> AsyncLLMClient:
+) -> Union[AsyncLLMClient, "AsyncSolanaLLMClient"]:  # type: ignore[name-defined]
     """Return a cached async client for the given creds/url.
 
-    **Base only today.** Solana doesn't expose an async client in the SDK
-    yet; calling this with a Solana ``api_url`` raises
-    ``NotImplementedError``. For async + Solana, route through the sync
-    client wrapped in ``asyncio.to_thread(...)`` or wait for SDK support.
+    Routes to :class:`AsyncSolanaLLMClient` when ``api_url`` points at
+    ``sol.blockrun.ai``, otherwise :class:`AsyncLLMClient` (Base).
+    Requires ``blockrun-llm>=0.22.0`` for the async Solana client.
     """
-    if _is_solana_url(api_url):
-        raise NotImplementedError(
-            "Solana async streaming is not yet supported by the SDK. "
-            "Use the sync entrypoints, or wrap in asyncio.to_thread()."
-        )
+    is_solana = _is_solana_url(api_url)
     key = _client_key(api_url, private_key)
     with _lock:
         client = _async_clients.get(key)
         if client is None:
-            client = AsyncLLMClient(private_key=private_key, api_url=api_url)
+            if is_solana:
+                if not _HAS_SOLANA or AsyncSolanaLLMClient is None:
+                    raise ImportError(
+                        "Solana support requires the solana extra. "
+                        "Install with: pip install 'blockrun-litellm[solana]'"
+                    )
+                client = AsyncSolanaLLMClient(
+                    private_key=private_key,
+                    api_url=api_url or SOLANA_API_URL,
+                )
+            else:
+                client = AsyncLLMClient(private_key=private_key, api_url=api_url)
             _async_clients[key] = client
         return client
 
