@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/blockrun-litellm.svg)](https://pypi.org/project/blockrun-litellm/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code.
+LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code. **Base and Solana chains supported.**
 
 > **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. The only thing that differs is *authentication*: BlockRun uses per-request x402 wallet signatures (non-custodial USDC micropayments on Base / Solana), not a Bearer API key. This package bridges that gap.
 
@@ -48,14 +48,26 @@ $ curl -sS http://127.0.0.1:4001/v1/chat/completions \
 ## Install
 
 ```bash
-# Custom provider only (no proxy server)
+# Base chain only — minimal
 pip install blockrun-litellm
 
-# Custom provider + local proxy (includes FastAPI/uvicorn)
+# Base chain + local OpenAI-compatible proxy (FastAPI/uvicorn)
 pip install 'blockrun-litellm[proxy]'
+
+# Base + Solana (adds the x402 SVM toolchain)
+pip install 'blockrun-litellm[proxy,solana]'
 ```
 
 Requires Python ≥ 3.9.
+
+## Chains supported
+
+| Chain | Gateway URL | Wallet env var | Status |
+|---|---|---|---|
+| Base (USDC) | `https://blockrun.ai/api` *(default)* | `BLOCKRUN_WALLET_KEY` | sync + async, streaming |
+| Solana (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | sync + streaming (async NotImplementedError) |
+
+To route on Solana, pass `api_base="https://sol.blockrun.ai/api"` plus `api_key=<solana-key>` to `litellm.completion(...)` — the adapter detects the chain from the URL and uses the right SDK client.
 
 ---
 
@@ -259,6 +271,64 @@ BlockRun-specific extras (also accepted):
 
 ---
 
+## Local request log (input/output tokens, latency, cost)
+
+Opt-in JSONL logger captures every call — works on both Base and Solana, sync and async, streaming and non-streaming.
+
+### Where the log lives
+
+| Source | Path |
+|---|---|
+| Explicit arg to `enable_local_logging("...")` | (whatever you pass) |
+| `BLOCKRUN_LITELLM_LOG` env var | (whatever it points to) |
+| Otherwise | **`~/.blockrun/litellm_calls.jsonl`** |
+
+### Each row contains
+
+```
+ts, iso, model, provider, messages, completion,
+usage{prompt_tokens, completion_tokens, total_tokens},
+latency_ms, stream, cost_usd, status, error_type, error_message, request_id
+```
+
+### Mode 1 — one line
+
+```python
+from blockrun_litellm import enable_local_logging
+enable_local_logging()                       # default path
+# or enable_local_logging("/var/log/calls.jsonl")
+```
+
+### Mode 2 — drop a bridge file next to `config.yaml`
+
+```python
+# custom_callbacks.py
+from blockrun_litellm.logger import JSONLLogger
+blockrun_logger = JSONLLogger()
+```
+
+```yaml
+litellm_settings:
+  callbacks: ["custom_callbacks.blockrun_logger"]
+```
+
+---
+
+## Where everything is stored
+
+| File / env var | What | Configurable? |
+|---|---|---|
+| `BLOCKRUN_WALLET_KEY` (env) | Base private key | yes |
+| `SOLANA_WALLET_KEY` (env) | Solana private key | yes |
+| `~/.blockrun/.session` | Auto-created Base wallet | — |
+| `~/.blockrun/.solana-session` | Auto-created Solana wallet | — |
+| `~/.blockrun/litellm_calls.jsonl` | LiteLLM request log | `BLOCKRUN_LITELLM_LOG` env or `enable_local_logging(path)` |
+| `~/.blockrun/cost_log.jsonl` | USDC cost audit for paid calls (SDK) | — |
+| `~/.blockrun/data/*.json` | Full request/response archive for paid calls (SDK) | — |
+| `BLOCKRUN_PROXY_TOKEN` (env) | Optional shared-secret guard on sidecar | yes |
+
+---
+
 ## Examples
 
 The `examples/` directory has copy-paste-ready snippets:
@@ -266,6 +336,7 @@ The `examples/` directory has copy-paste-ready snippets:
 - [`examples/python_lib.py`](examples/python_lib.py) — full LiteLLM Python library usage
 - [`examples/litellm_config.yaml`](examples/litellm_config.yaml) — LiteLLM Proxy Server config
 - [`examples/raw_openai_sdk.py`](examples/raw_openai_sdk.py) — pointing the OpenAI SDK at the proxy
+- [`examples/custom_callbacks.py`](examples/custom_callbacks.py) — JSONL log bridge for Proxy mode
 
 ---
 
