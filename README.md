@@ -6,6 +6,10 @@
 
 LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code. **Base and Solana chains supported.**
 
+📚 **Full docs in [`docs/`](docs/)** — bilingual (English + 中文):
+- [`CUSTOMER-ONBOARDING`](docs/CUSTOMER-ONBOARDING.md) / [`中文`](docs/CUSTOMER-ONBOARDING.zh.md) — 5-minute walkthrough, both modes
+- [`PROXY-FULL-SETUP`](docs/PROXY-FULL-SETUP.md) / [`中文`](docs/PROXY-FULL-SETUP.zh.md) — full deploy with admin UI + Postgres + troubleshooting
+
 > **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. The only thing that differs is *authentication*: BlockRun uses per-request x402 wallet signatures (non-custodial USDC micropayments on Base / Solana), not a Bearer API key. This package bridges that gap.
 
 [中文文档见底部 / Chinese docs at the bottom](#中文文档)
@@ -65,7 +69,7 @@ Requires Python ≥ 3.9.
 | Chain | Gateway URL | Wallet env var | Status |
 |---|---|---|---|
 | Base (USDC) | `https://blockrun.ai/api` *(default)* | `BLOCKRUN_WALLET_KEY` | sync + async, streaming |
-| Solana (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | sync + streaming (async NotImplementedError) |
+| Solana (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | sync + async, streaming on both (since 0.3.1) |
 
 To route on Solana, pass `api_base="https://sol.blockrun.ai/api"` plus `api_key=<solana-key>` to `litellm.completion(...)` — the adapter detects the chain from the URL and uses the right SDK client.
 
