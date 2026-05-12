@@ -227,7 +227,7 @@ curl http://localhost:4001/v1/chat/completions \
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions (non-streaming) |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
@@ -246,7 +246,7 @@ All of these are forwarded to BlockRun unchanged:
 | `temperature` | ✅ | 0–2 |
 | `top_p` | ✅ | |
 | `tools` / `tool_choice` | ✅ | Function calling |
-| `stream` | ❌ | **Not yet wired in this adapter** — fails fast with HTTP 400. The BlockRun gateway itself fully supports SSE (`text/event-stream`); the gap is on the `blockrun-llm` SDK client side. Targeting v0.2.0. |
+| `stream` | ✅ | OpenAI-style SSE (`text/event-stream`). Provider mode yields LiteLLM `GenericStreamingChunk` objects; proxy mode emits `data: <json>\n\n` events terminated by `data: [DONE]`. Free models stream directly; paid models stream after the in-band 402-sign-retry dance. |
 | `frequency_penalty` / `presence_penalty` / `logprobs` / `n` | ⚠️ | Silently dropped — enable `litellm_settings.drop_params: True` to suppress LiteLLM warnings |
 
 BlockRun-specific extras (also accepted):
@@ -298,7 +298,7 @@ The `examples/` directory has copy-paste-ready snippets:
 ## FAQ
 
 **Q: Does this support streaming?**
-Not yet — but the limitation is on the SDK client side, not the gateway. BlockRun's `/v1/chat/completions` already serves SSE (`text/event-stream`) for both free and paid models. What's missing is SSE parsing in the `blockrun-llm` Python SDK that this adapter wraps; once that lands (or once this adapter starts hitting the gateway directly for streaming), `stream=True` will work end-to-end. Set `stream=False` (or omit it) for now.
+Yes, as of v0.2.0. Pass `stream=True` and the adapter routes through `blockrun-llm`'s `chat_completion_stream()` (SDK ≥ 0.20.0). The 402 → sign-locally → retry-with-PAYMENT-SIGNATURE dance happens before the first chunk; once the upstream switches to `text/event-stream`, chunks are forwarded straight through (provider mode → `litellm.GenericStreamingChunk`, proxy mode → OpenAI-style `data: <json>\n\n` SSE). Caveats inherited from the gateway: `search_parameters` and the Responses-API models (`codex`, `gpt-5.4-pro`) reject streaming server-side with 400.
 
 **Q: Where does my private key live?**
 On your machine only — `BLOCKRUN_WALLET_KEY` env var, or `~/.blockrun/.session` if you used `setup_agent_wallet()`. The proxy and provider both read from those sources via `blockrun-llm`. Only EIP-712 signatures are transmitted.
@@ -429,7 +429,7 @@ resp = client.chat.completions.create(
 |---|---|---|
 | `model` / `messages` / `max_tokens` / `temperature` / `top_p` | ✅ | |
 | `tools` / `tool_choice` | ✅ | 函数调用 |
-| `stream` | ❌ | **本适配层暂未接通流式**，请求会直接 400。**BlockRun 后端 `/v1/chat/completions` 本身完全支持 SSE**（`text/event-stream`，免费/付费模型都支持），缺口在 [`blockrun-llm`](https://github.com/BlockRunAI/blockrun-llm) Python SDK 的客户端 SSE 解析。计划 v0.2.0 补齐。 |
+| `stream` | ✅ | OpenAI 标准 SSE（`text/event-stream`）。Provider 模式 yield LiteLLM `GenericStreamingChunk`；Proxy 模式发 `data: <json>\n\n` 事件并以 `data: [DONE]` 结尾。免费模型直接开流；付费模型走带内 402→签名→重试再开流。 |
 | `frequency_penalty` / `presence_penalty` / `logprobs` / `n` | ⚠️ | 静默丢弃 —— 建议 LiteLLM 配 `drop_params: True` 抑制告警 |
 
 BlockRun 额外参数：
@@ -443,7 +443,7 @@ BlockRun 额外参数：
 ## 常见问题
 
 **Q：支持流式吗？**
-本适配层暂未接通，但**限制不在协议层**——BlockRun 后端 `/v1/chat/completions` 早就跑着 SSE（免费 tier 和付费 tier 都是流式返回 `text/event-stream`）。缺口在 `blockrun-llm` Python SDK 还没实现客户端 SSE 解析。SDK 那边补上、或本适配层直接绕开 SDK 自己处理 SSE 之后，`stream=True` 就能端到端跑通。当前先用 `stream=False`。
+v0.2.0 起完全支持。`stream=True` 时适配层走 `blockrun-llm` 的 `chat_completion_stream()`（SDK ≥ 0.20.0），402 → 本地签名 → 带 PAYMENT-SIGNATURE 重试这条链在第一个 chunk 之前完成；上游切到 `text/event-stream` 后 chunks 直接透传（Provider 模式 → `litellm.GenericStreamingChunk`，Proxy 模式 → OpenAI 标准 `data: <json>\n\n`）。后端继承的限制：`search_parameters` 和 Responses-API 模型（`codex`、`gpt-5.4-pro`）在服务端就拒绝流式（400）。
 
 **Q：私钥放哪？**
 只在本地 —— `BLOCKRUN_WALLET_KEY` 环境变量，或 `setup_agent_wallet()` 创建的 `~/.blockrun/.session`。Provider 和 Proxy 都通过 `blockrun-llm` 读取。链上只看到签名，看不到私钥。

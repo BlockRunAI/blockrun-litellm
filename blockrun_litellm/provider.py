@@ -34,10 +34,13 @@ The key never leaves the host — only EIP-712 signatures travel over the wire.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
 import litellm
 from litellm import CustomLLM
+from litellm.types.utils import GenericStreamingChunk
+
+from blockrun_llm.types import ChatCompletionChunk
 
 from blockrun_litellm import _adapter
 
@@ -83,6 +86,48 @@ def _build_response(model: str, payload: Dict[str, Any]) -> litellm.ModelRespons
     return litellm.ModelResponse(**payload, model=model)
 
 
+def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
+    """Map a BlockRun :class:`ChatCompletionChunk` → LiteLLM
+    :class:`GenericStreamingChunk` (a ``TypedDict``).
+
+    BlockRun's chunk schema is the OpenAI ``chat.completion.chunk`` schema.
+    LiteLLM's ``GenericStreamingChunk`` is a simpler, provider-agnostic
+    structure that the streaming handler stitches into a final response.
+    """
+    if not chunk.choices:
+        # Defensive: BlockRun shouldn't emit chunks without a choice, but
+        # if it ever does we emit an empty heartbeat chunk so the consumer
+        # iterator doesn't break.
+        return GenericStreamingChunk(
+            text="",
+            is_finished=False,
+            finish_reason="",
+            usage=None,
+            index=0,
+        )
+
+    choice = chunk.choices[0]
+    text = choice.delta.content or ""
+    finish_reason = choice.finish_reason or ""
+
+    # BlockRun's per-chunk usage is rarely populated; LiteLLM tolerates None.
+    usage = None
+    if chunk.usage is not None:
+        usage = {
+            "prompt_tokens": chunk.usage.prompt_tokens,
+            "completion_tokens": chunk.usage.completion_tokens,
+            "total_tokens": chunk.usage.total_tokens,
+        }
+
+    return GenericStreamingChunk(
+        text=text,
+        is_finished=bool(finish_reason),
+        finish_reason=finish_reason,
+        usage=usage,
+        index=choice.index,
+    )
+
+
 class BlockRunLLM(CustomLLM):
     """LiteLLM custom provider that routes through BlockRun's x402 gateway."""
 
@@ -123,6 +168,50 @@ class BlockRunLLM(CustomLLM):
             **openai_kwargs,
         )
         return _build_response(model, payload)
+
+    # ----- Streaming -------------------------------------------------------
+
+    def streaming(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Iterator[GenericStreamingChunk]:
+        """Sync streaming. Yields :class:`GenericStreamingChunk` per delta."""
+        openai_kwargs = _collect_openai_kwargs(kwargs)
+        # ``stream`` is implicit at this entrypoint; drop it so the SDK doesn't
+        # see a duplicate kwarg.
+        openai_kwargs.pop("stream", None)
+        for chunk in _adapter.chat_completion_stream_sync(
+            model=model,
+            messages=messages,
+            api_url=api_base,
+            private_key=api_key,
+            **openai_kwargs,
+        ):
+            yield _to_generic_chunk(chunk)
+
+    async def astreaming(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[GenericStreamingChunk]:
+        """Async streaming. Same semantics as :meth:`streaming`."""
+        openai_kwargs = _collect_openai_kwargs(kwargs)
+        openai_kwargs.pop("stream", None)
+        async for chunk in _adapter.chat_completion_stream_async(
+            model=model,
+            messages=messages,
+            api_url=api_base,
+            private_key=api_key,
+            **openai_kwargs,
+        ):
+            yield _to_generic_chunk(chunk)
 
 
 _PROVIDER_NAME = "blockrun"

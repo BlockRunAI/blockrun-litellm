@@ -25,4 +25,4 @@ The adapter delegates x402 wallet signing and payment to the
 from blockrun_litellm.provider import BlockRunLLM, register
 
 __all__ = ["BlockRunLLM", "register"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

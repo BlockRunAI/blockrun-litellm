@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.0 — 2026-05-12
+
+### New
+- **Streaming (`stream=True`) end-to-end.** Both integration modes now
+  speak SSE:
+  - **Provider mode** — `BlockRunLLM` implements
+    `CustomLLM.streaming()` and `astreaming()`, yielding LiteLLM
+    `GenericStreamingChunk` objects so `litellm.completion(..., stream=True)`
+    just works.
+  - **Proxy mode** — `POST /v1/chat/completions` returns
+    `text/event-stream` when `stream=True`, emitting OpenAI-style
+    `data: <json>\n\n` events and a terminating `data: [DONE]`. Errors
+    raised mid-stream are surfaced as a final `data: {"error": ...}`
+    event rather than HTTP errors (headers already flushed).
+- **Adapter API:** `_adapter.chat_completion_stream_sync()` and
+  `chat_completion_stream_async()` are the new public entrypoints.
+  `StreamingNotSupported` is removed — the previous "fail-fast at the
+  adapter" behavior is no longer needed.
+- **Dependency bumped:** `blockrun-llm>=0.20.0` (this is the SDK release
+  that introduces `chat_completion_stream()`).
+
+### Removed
+- `_adapter.StreamingNotSupported` — replaced by real streaming support.
+
+### Notes
+- Caveats inherited from the BlockRun gateway: `search_parameters` and
+  the Responses-API models (`codex`, `gpt-5.4-pro`) reject streaming
+  server-side with 400. The adapter does not pre-filter those — clients
+  see the same 400 their own LiteLLM call would surface.
+
 ## 0.1.0 — 2026-05-11
 
 Initial release. Published to PyPI as

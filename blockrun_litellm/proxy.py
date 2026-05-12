@@ -31,16 +31,18 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError as exc:  # pragma: no cover - import-time guard
     raise ImportError(
         "blockrun-litellm[proxy] extras not installed. "
         "Run: pip install 'blockrun-litellm[proxy]'"
     ) from exc
+
+import json as _json
 
 from blockrun_llm.types import APIError, PaymentError
 
@@ -51,7 +53,7 @@ log = logging.getLogger("blockrun_litellm.proxy")
 app = FastAPI(
     title="blockrun-litellm proxy",
     description="OpenAI-compatible front-end for BlockRun's x402 gateway.",
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
 )
 
@@ -102,6 +104,34 @@ async def list_models() -> Dict[str, Any]:
     }
 
 
+async def _sse_event_stream(
+    model: str,
+    messages: List[Dict[str, Any]],
+    openai_kwargs: Dict[str, Any],
+):
+    """Async generator that renders BlockRun chunks as OpenAI SSE events.
+
+    Each chunk is emitted as ``data: <json>\\n\\n`` (OpenAI convention),
+    followed by a terminating ``data: [DONE]\\n\\n`` once the upstream
+    iterator drains. Errors during streaming are surfaced as a final
+    ``data: {"error": ...}`` event before the [DONE], since headers
+    have already been flushed.
+    """
+    try:
+        async for chunk in _adapter.chat_completion_stream_async(
+            model=model, messages=messages, **openai_kwargs
+        ):
+            yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
+    except PaymentError as exc:
+        yield f"data: {_json.dumps({'error': {'type': 'payment_required', 'message': str(exc)}})}\n\n"
+    except APIError as exc:
+        yield f"data: {_json.dumps({'error': {'type': 'upstream_error', 'message': str(exc), 'status': getattr(exc, 'status_code', None)}})}\n\n"
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("stream error")
+        yield f"data: {_json.dumps({'error': {'type': 'internal_error', 'message': str(exc)}})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 @app.post("/v1/chat/completions", dependencies=[Depends(_require_token)])
 async def chat_completions(request: Request) -> Any:
     try:
@@ -114,8 +144,24 @@ async def chat_completions(request: Request) -> Any:
     if not model or not isinstance(messages, list):
         raise HTTPException(400, "`model` and `messages` are required")
 
+    stream = bool(body.get("stream"))
+
     # Drop control fields before forwarding the rest as OpenAI kwargs.
-    openai_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages")}
+    openai_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages", "stream")}
+
+    if stream:
+        # SSE response. Errors before the first chunk (e.g. payment failure
+        # during the 402 dance) get embedded in the stream rather than as
+        # HTTP errors — easier for OpenAI-compatible clients to consume.
+        return StreamingResponse(
+            _sse_event_stream(model, messages, openai_kwargs),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # disable proxy buffering
+                "Connection": "keep-alive",
+            },
+        )
 
     try:
         payload = await _adapter.chat_completion_async(
@@ -123,14 +169,9 @@ async def chat_completions(request: Request) -> Any:
             messages=messages,
             **openai_kwargs,
         )
-    except _adapter.StreamingNotSupported as exc:
-        raise HTTPException(400, str(exc))
     except PaymentError as exc:
-        # Budget exceeded / wallet underfunded — map to 402 so clients can
-        # surface a clean payment-required message.
         raise HTTPException(402, str(exc))
     except APIError as exc:
-        # Upstream BlockRun error — preserve status code when reasonable.
         status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
         return JSONResponse(status_code=status, content={"error": str(exc)})
 

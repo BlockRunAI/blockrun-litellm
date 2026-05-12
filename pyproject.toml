@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.1.0"
+version = "0.2.0"
 description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
 readme = "README.md"
 license = "MIT"
@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "blockrun-llm>=0.19.0",
+    "blockrun-llm>=0.20.0",
     "litellm>=1.40.0",
 ]
 

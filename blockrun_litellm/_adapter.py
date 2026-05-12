@@ -8,11 +8,13 @@ modes behave identically.
 Design notes
 ------------
 - BlockRun's HTTP API is already OpenAI-shaped. The blockrun-llm SDK
-  returns a Pydantic ``ChatResponse`` whose ``.model_dump()`` is a valid
-  OpenAI Chat Completions response.
+  returns a Pydantic ``ChatResponse`` (or ``ChatCompletionChunk`` in
+  stream mode) whose ``.model_dump()`` is a valid OpenAI Chat Completions
+  response (or chunk).
 - We therefore only translate at the *boundary*: accept an OpenAI dict
-  request, dispatch through ``LLMClient.chat_completion(...)`` so x402
-  signing happens inside the SDK, and return the dumped pydantic model.
+  request, dispatch through ``LLMClient.chat_completion(...)`` /
+  ``chat_completion_stream(...)`` so x402 signing happens inside the SDK,
+  and return the dumped pydantic models.
 - The ``model`` string is forwarded verbatim. LiteLLM strips its
   ``blockrun/`` prefix before invoking the handler, so values like
   ``openai/gpt-5.5`` reach this layer unchanged — which is exactly what
@@ -23,10 +25,10 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
-from blockrun_llm import LLMClient, AsyncLLMClient
-from blockrun_llm.types import APIError, PaymentError
+from blockrun_llm import AsyncLLMClient, LLMClient
+from blockrun_llm.types import APIError, ChatCompletionChunk, PaymentError
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +79,9 @@ def get_async_client(
 # Request normalization
 # ---------------------------------------------------------------------------
 
-# OpenAI-style params that blockrun-llm's ``chat_completion`` accepts directly.
-# Anything outside this set is dropped with a debug log — LiteLLM tends to
-# forward provider-specific kwargs that don't apply here.
+# OpenAI-style params that blockrun-llm's chat methods accept directly.
+# Anything outside this set is dropped — LiteLLM tends to forward
+# provider-specific kwargs that don't apply here.
 _FORWARDED_KWARGS = {
     "max_tokens",
     "temperature",
@@ -92,32 +94,16 @@ _FORWARDED_KWARGS = {
 }
 
 
-class StreamingNotSupported(Exception):
-    """Raised when the caller asks for ``stream=True``.
+def _filter_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Whitelist OpenAI-format kwargs into the shape blockrun-llm wants.
 
-    BlockRun's x402 settlement is per-request, not per-chunk, so server-sent
-    events are not yet wired up. We surface a clear error instead of silently
-    buffering. Track upstream support in the blockrun-llm changelog.
+    Does **not** raise on ``stream=True`` — streaming has its own entrypoint.
     """
-
-
-def _split_request(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Whitelist OpenAI-format kwargs into the shape ``chat_completion`` wants."""
-    if payload.get("stream"):
-        raise StreamingNotSupported(
-            "stream=True is not supported by blockrun-litellm v0.1.x. "
-            "Set stream=False or omit it."
-        )
-
-    kwargs: Dict[str, Any] = {}
-    for k in _FORWARDED_KWARGS:
-        if k in payload and payload[k] is not None:
-            kwargs[k] = payload[k]
-    return kwargs
+    return {k: payload[k] for k in _FORWARDED_KWARGS if payload.get(k) is not None}
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoints
+# Non-streaming entrypoints
 # ---------------------------------------------------------------------------
 
 
@@ -130,13 +116,20 @@ def chat_completion_sync(
     **openai_kwargs: Any,
 ) -> Dict[str, Any]:
     """
-    Run a chat completion via blockrun-llm and return an OpenAI-format dict.
+    Run a non-streaming chat completion via blockrun-llm; return an
+    OpenAI-format dict.
 
     ``model`` is forwarded as-is to the BlockRun gateway (e.g.
     ``"openai/gpt-5.5"``, ``"anthropic/claude-opus-4-5"``). Any LiteLLM
     ``blockrun/`` prefix should be stripped by the caller.
+
+    For ``stream=True``, use :func:`chat_completion_stream_sync` instead —
+    LiteLLM dispatches streaming through a different entrypoint.
     """
-    kwargs = _split_request({"messages": messages, **openai_kwargs})
+    # Ignore stream= if it leaks in here; callers should route through the
+    # stream functions for the streaming case.
+    openai_kwargs.pop("stream", None)
+    kwargs = _filter_kwargs(openai_kwargs)
     client = get_sync_client(api_url=api_url, private_key=private_key)
     response = client.chat_completion(model=model, messages=messages, **kwargs)
     return response.model_dump(exclude_none=True)
@@ -151,18 +144,66 @@ async def chat_completion_async(
     **openai_kwargs: Any,
 ) -> Dict[str, Any]:
     """Async variant of :func:`chat_completion_sync`."""
-    kwargs = _split_request({"messages": messages, **openai_kwargs})
+    openai_kwargs.pop("stream", None)
+    kwargs = _filter_kwargs(openai_kwargs)
     client = get_async_client(api_url=api_url, private_key=private_key)
     response = await client.chat_completion(model=model, messages=messages, **kwargs)
     return response.model_dump(exclude_none=True)
 
 
+# ---------------------------------------------------------------------------
+# Streaming entrypoints
+# ---------------------------------------------------------------------------
+
+
+def chat_completion_stream_sync(
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+    **openai_kwargs: Any,
+) -> Iterator[ChatCompletionChunk]:
+    """
+    Stream a chat completion via blockrun-llm SDK's
+    :meth:`LLMClient.chat_completion_stream`.
+
+    Yields :class:`ChatCompletionChunk` objects (OpenAI ``chat.completion.chunk``
+    schema). Caller is responsible for downstream formatting — e.g. the
+    LiteLLM provider maps each chunk into a ``GenericStreamingChunk``, while
+    the FastAPI proxy serializes each as ``data: <json>\\n\\n``.
+    """
+    openai_kwargs.pop("stream", None)
+    kwargs = _filter_kwargs(openai_kwargs)
+    client = get_sync_client(api_url=api_url, private_key=private_key)
+    yield from client.chat_completion_stream(model=model, messages=messages, **kwargs)
+
+
+async def chat_completion_stream_async(
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+    **openai_kwargs: Any,
+) -> AsyncIterator[ChatCompletionChunk]:
+    """Async variant of :func:`chat_completion_stream_sync`."""
+    openai_kwargs.pop("stream", None)
+    kwargs = _filter_kwargs(openai_kwargs)
+    client = get_async_client(api_url=api_url, private_key=private_key)
+    async for chunk in client.chat_completion_stream(
+        model=model, messages=messages, **kwargs
+    ):
+        yield chunk
+
+
 __all__ = [
     "chat_completion_sync",
     "chat_completion_async",
+    "chat_completion_stream_sync",
+    "chat_completion_stream_async",
     "get_sync_client",
     "get_async_client",
-    "StreamingNotSupported",
     "APIError",
     "PaymentError",
 ]
