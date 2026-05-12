@@ -36,13 +36,68 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
+import httpx
 import litellm
 from litellm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk
 
+from blockrun_llm.types import APIError as BlockRunAPIError
 from blockrun_llm.types import ChatCompletionChunk
 
 from blockrun_litellm import _adapter
+
+
+# Provider name surfaced to LiteLLM exception classes so the router knows
+# this is BlockRun-routed when it logs / retries / falls back.
+_LITELLM_PROVIDER = "blockrun"
+
+
+def _translate_to_litellm(exc: Exception, model: str) -> Optional[Exception]:
+    """Map a transient BlockRun / network error to LiteLLM's retriable
+    exception hierarchy so the router's own fallback machinery kicks in.
+
+    Returns the LiteLLM-compatible exception to raise, or ``None`` if the
+    exception is not transient (caller should re-raise as-is).
+
+    Mappings:
+      * ``httpx.TimeoutException``        → ``litellm.Timeout``
+      * ``httpx.NetworkError``            → ``litellm.APIConnectionError``
+      * ``APIError`` 500                  → ``litellm.InternalServerError``
+      * ``APIError`` 502 / 504            → ``litellm.APIConnectionError``
+      * ``APIError`` 503                  → ``litellm.ServiceUnavailableError``
+      * ``APIError`` 429                  → ``litellm.RateLimitError``
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return litellm.Timeout(
+            message=f"BlockRun upstream timed out: {exc}",
+            model=model,
+            llm_provider=_LITELLM_PROVIDER,
+        )
+    if isinstance(exc, httpx.NetworkError):
+        return litellm.APIConnectionError(
+            message=f"BlockRun upstream network error: {exc}",
+            model=model,
+            llm_provider=_LITELLM_PROVIDER,
+        )
+    if isinstance(exc, BlockRunAPIError):
+        status = getattr(exc, "status_code", 0)
+        if status == 429:
+            return litellm.RateLimitError(
+                message=str(exc), model=model, llm_provider=_LITELLM_PROVIDER
+            )
+        if status == 500:
+            return litellm.InternalServerError(
+                message=str(exc), model=model, llm_provider=_LITELLM_PROVIDER
+            )
+        if status == 503:
+            return litellm.ServiceUnavailableError(
+                message=str(exc), model=model, llm_provider=_LITELLM_PROVIDER
+            )
+        if status in (502, 504):
+            return litellm.APIConnectionError(
+                message=str(exc), model=model, llm_provider=_LITELLM_PROVIDER
+            )
+    return None
 
 
 # LiteLLM passes the provider-stripped model name *and* an "optional_params"
@@ -142,13 +197,19 @@ class BlockRunLLM(CustomLLM):
         **kwargs: Any,
     ) -> litellm.ModelResponse:
         openai_kwargs = _collect_openai_kwargs(kwargs)
-        payload = _adapter.chat_completion_sync(
-            model=model,
-            messages=messages,
-            api_url=api_base,
-            private_key=api_key,
-            **openai_kwargs,
-        )
+        try:
+            payload = _adapter.chat_completion_sync(
+                model=model,
+                messages=messages,
+                api_url=api_base,
+                private_key=api_key,
+                **openai_kwargs,
+            )
+        except Exception as exc:
+            translated = _translate_to_litellm(exc, model)
+            if translated is not None:
+                raise translated from exc
+            raise
         return _build_response(model, payload)
 
     async def acompletion(
@@ -160,13 +221,19 @@ class BlockRunLLM(CustomLLM):
         **kwargs: Any,
     ) -> litellm.ModelResponse:
         openai_kwargs = _collect_openai_kwargs(kwargs)
-        payload = await _adapter.chat_completion_async(
-            model=model,
-            messages=messages,
-            api_url=api_base,
-            private_key=api_key,
-            **openai_kwargs,
-        )
+        try:
+            payload = await _adapter.chat_completion_async(
+                model=model,
+                messages=messages,
+                api_url=api_base,
+                private_key=api_key,
+                **openai_kwargs,
+            )
+        except Exception as exc:
+            translated = _translate_to_litellm(exc, model)
+            if translated is not None:
+                raise translated from exc
+            raise
         return _build_response(model, payload)
 
     # ----- Streaming -------------------------------------------------------
@@ -179,19 +246,31 @@ class BlockRunLLM(CustomLLM):
         api_key: Optional[str] = None,
         **kwargs: Any,
     ) -> Iterator[GenericStreamingChunk]:
-        """Sync streaming. Yields :class:`GenericStreamingChunk` per delta."""
+        """Sync streaming. Yields :class:`GenericStreamingChunk` per delta.
+
+        Errors from the SDK during stream setup or mid-flight are
+        translated to LiteLLM's retriable exception types via
+        :func:`_translate_to_litellm` so the router's own fallback
+        machinery can pick the next provider on transient upstream issues.
+        """
         openai_kwargs = _collect_openai_kwargs(kwargs)
         # ``stream`` is implicit at this entrypoint; drop it so the SDK doesn't
         # see a duplicate kwarg.
         openai_kwargs.pop("stream", None)
-        for chunk in _adapter.chat_completion_stream_sync(
-            model=model,
-            messages=messages,
-            api_url=api_base,
-            private_key=api_key,
-            **openai_kwargs,
-        ):
-            yield _to_generic_chunk(chunk)
+        try:
+            for chunk in _adapter.chat_completion_stream_sync(
+                model=model,
+                messages=messages,
+                api_url=api_base,
+                private_key=api_key,
+                **openai_kwargs,
+            ):
+                yield _to_generic_chunk(chunk)
+        except Exception as exc:
+            translated = _translate_to_litellm(exc, model)
+            if translated is not None:
+                raise translated from exc
+            raise
 
     async def astreaming(
         self,
@@ -204,14 +283,20 @@ class BlockRunLLM(CustomLLM):
         """Async streaming. Same semantics as :meth:`streaming`."""
         openai_kwargs = _collect_openai_kwargs(kwargs)
         openai_kwargs.pop("stream", None)
-        async for chunk in _adapter.chat_completion_stream_async(
-            model=model,
-            messages=messages,
-            api_url=api_base,
-            private_key=api_key,
-            **openai_kwargs,
-        ):
-            yield _to_generic_chunk(chunk)
+        try:
+            async for chunk in _adapter.chat_completion_stream_async(
+                model=model,
+                messages=messages,
+                api_url=api_base,
+                private_key=api_key,
+                **openai_kwargs,
+            ):
+                yield _to_generic_chunk(chunk)
+        except Exception as exc:
+            translated = _translate_to_litellm(exc, model)
+            if translated is not None:
+                raise translated from exc
+            raise
 
 
 _PROVIDER_NAME = "blockrun"

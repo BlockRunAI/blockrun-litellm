@@ -27,14 +27,19 @@ def test_sync_round_trip_returns_openai_dict(stub_sync_client) -> None:
     assert "stream" not in kwargs
 
 
-def test_streaming_request_is_rejected(stub_sync_client) -> None:
-    with pytest.raises(_adapter.StreamingNotSupported):
-        _adapter.chat_completion_sync(
-            model="openai/gpt-5.5",
-            messages=[{"role": "user", "content": "hi"}],
-            stream=True,
-        )
-    stub_sync_client.chat_completion.assert_not_called()
+def test_stream_kwarg_is_silently_dropped_in_non_streaming_path(stub_sync_client) -> None:
+    """The non-streaming entrypoint ignores any ``stream`` kwarg that leaks
+    through (callers should route through the stream entrypoint instead).
+    The SDK never sees the kwarg — it never appears in the call args."""
+    _adapter.chat_completion_sync(
+        model="openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=True,
+        max_tokens=10,
+    )
+    _, kwargs = stub_sync_client.chat_completion.call_args
+    assert "stream" not in kwargs
+    assert kwargs["max_tokens"] == 10
 
 
 def test_unknown_kwargs_are_dropped(stub_sync_client) -> None:

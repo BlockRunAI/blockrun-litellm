@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.1 — 2026-05-12
+
+### Improved
+- **Transient errors now translate to LiteLLM's retriable exception
+  hierarchy** so the router's own fallback and retry machinery picks
+  up where the SDK leaves off. Mapping (in `_translate_to_litellm`):
+  - `APIError(500)` → `litellm.InternalServerError`
+  - `APIError(502)` / `APIError(504)` → `litellm.APIConnectionError`
+  - `APIError(503)` → `litellm.ServiceUnavailableError`
+  - `APIError(429)` → `litellm.RateLimitError`
+  - `httpx.TimeoutException` → `litellm.Timeout`
+  - `httpx.NetworkError` → `litellm.APIConnectionError`
+  Everything else propagates unchanged so callers see the real error.
+  Applied uniformly to `completion()`, `acompletion()`, `streaming()`,
+  and `astreaming()`. Combined with the SDK's in-band 5xx retry (added
+  in `blockrun-llm` 0.20.1), most transient hiccups self-heal before
+  ever reaching the caller — and the ones that don't are now marked
+  retriable so `litellm.Router` can switch providers automatically.
+- **Dependency bump:** `blockrun-llm>=0.20.1` (the SDK release that
+  ships the matching retry / `fallback_models` improvements).
+
+### Tests
+- Seven new unit tests in `tests/test_provider.py` covering the 5xx /
+  429 / Timeout / Network translations and verifying that
+  non-transient errors (e.g. `RuntimeError`) pass through unchanged.
+- Replaced the stale `test_streaming_request_is_rejected` test
+  (which asserted v0.1.0's `StreamingNotSupported`) with a kwarg-leak
+  check that the non-streaming entrypoint silently drops `stream=True`.
+
 ## 0.2.0 — 2026-05-12
 
 ### New
