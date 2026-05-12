@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.2 — 2026-05-12
+
+### Fixed
+- **Tool calling works on Solana now.** The adapter previously dropped
+  ``tools`` / ``tool_choice`` on the Solana path because the SDK didn't
+  accept them. Combined with ``blockrun-llm 0.22.1`` (which adds
+  ``tools`` / ``tool_choice`` to the Solana SDK methods), function
+  calling now works uniformly on Base **and** Solana. The adapter's
+  kwarg filter no longer special-cases the Solana chain — every chain
+  forwards the same OpenAI-style params.
+
+### Dependency bump
+- ``blockrun-llm>=0.22.1``.
+
 ## 0.3.1 — 2026-05-12
 
 ### New

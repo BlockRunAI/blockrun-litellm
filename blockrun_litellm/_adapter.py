@@ -143,7 +143,12 @@ def get_async_client(
 # OpenAI-style params that blockrun-llm's chat methods accept directly.
 # Anything outside this set is dropped — LiteLLM tends to forward
 # provider-specific kwargs that don't apply here.
-_BASE_FORWARDED_KWARGS = {
+#
+# Since blockrun-llm 0.22.1 (Solana) / 0.20.0 (Base), the set is the same
+# on both chains — function calling (``tools`` / ``tool_choice``) works on
+# either path because the BlockRun gateway forwards them to the upstream
+# model unchanged; the chain only differs in the payment leg.
+_FORWARDED_KWARGS = {
     "max_tokens",
     "temperature",
     "top_p",
@@ -154,20 +159,17 @@ _BASE_FORWARDED_KWARGS = {
     "fallback_models",
 }
 
-# SolanaLLMClient.chat_completion doesn't accept ``tools`` / ``tool_choice``
-# yet (function calling is Base-only today). Drop them on the Solana path so
-# we don't get a TypeError; callers see them silently ignored — same pattern
-# as LiteLLM's ``drop_params`` for unsupported OpenAI knobs.
-_SOLANA_FORWARDED_KWARGS = _BASE_FORWARDED_KWARGS - {"tools", "tool_choice"}
-
 
 def _filter_kwargs(payload: Dict[str, Any], *, is_solana: bool = False) -> Dict[str, Any]:
     """Whitelist OpenAI-format kwargs into the shape blockrun-llm wants.
 
+    The ``is_solana`` parameter is currently unused — kept in the signature
+    for backwards compatibility / future chain-specific filtering. Both
+    chains accept the same set of kwargs.
+
     Does **not** raise on ``stream=True`` — streaming has its own entrypoint.
     """
-    allowed = _SOLANA_FORWARDED_KWARGS if is_solana else _BASE_FORWARDED_KWARGS
-    return {k: payload[k] for k in allowed if payload.get(k) is not None}
+    return {k: payload[k] for k in _FORWARDED_KWARGS if payload.get(k) is not None}
 
 
 # ---------------------------------------------------------------------------

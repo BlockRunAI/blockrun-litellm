@@ -38,30 +38,18 @@ def test_is_solana_url_rejects_base():
     assert _is_solana_url("") is False
 
 
-def test_filter_kwargs_drops_tools_on_solana():
-    raw = {
-        "max_tokens": 64,
-        "temperature": 0.1,
-        "tools": [{"type": "function", "function": {"name": "x"}}],
-        "tool_choice": "auto",
-        "search": True,
-    }
-    out = _filter_kwargs(raw, is_solana=True)
-    assert "tools" not in out
-    assert "tool_choice" not in out
-    assert out["max_tokens"] == 64
-    assert out["search"] is True
-
-
-def test_filter_kwargs_keeps_tools_on_base():
+def test_filter_kwargs_keeps_tools_on_both_chains():
+    """As of blockrun-llm 0.22.1, ``tools`` / ``tool_choice`` are
+    supported on Solana too — the kwarg filter no longer drops them."""
     raw = {
         "max_tokens": 64,
         "tools": [{"type": "function", "function": {"name": "x"}}],
         "tool_choice": "auto",
     }
-    out = _filter_kwargs(raw, is_solana=False)
-    assert out["tools"] == raw["tools"]
-    assert out["tool_choice"] == "auto"
+    for is_solana in (True, False):
+        out = _filter_kwargs(raw, is_solana=is_solana)
+        assert out["tools"] == raw["tools"], f"tools missing for is_solana={is_solana}"
+        assert out["tool_choice"] == "auto"
 
 
 def test_async_solana_returns_async_solana_client(monkeypatch):
