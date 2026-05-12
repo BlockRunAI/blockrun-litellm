@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.2 — 2026-05-12
+
+### New
+- **Local JSONL request logger.** Opt-in observability that captures
+  every LiteLLM call — input messages, completion content, token
+  usage (`prompt_tokens` / `completion_tokens` / `total_tokens`),
+  latency, `stream` flag, optional `cost_usd`, and on failures the
+  `error_type` + `error_message`. Writes one JSON object per line to
+  `~/.blockrun/litellm_calls.jsonl` (override via
+  `BLOCKRUN_LITELLM_LOG` env var or explicit `path` arg).
+- **Two integration paths:**
+  - **Python library mode** — one line at startup:
+    ```python
+    from blockrun_litellm import enable_local_logging
+    enable_local_logging()
+    ```
+  - **LiteLLM Proxy Server mode** — drop a tiny `custom_callbacks.py`
+    bridge next to `config.yaml` (LiteLLM Proxy loads callbacks by
+    filename, not by installed package), then reference
+    `["custom_callbacks.blockrun_logger"]` in `litellm_settings.callbacks`.
+    See [`examples/custom_callbacks.py`](examples/custom_callbacks.py).
+- Built on LiteLLM's `CustomLogger` interface, so **streaming failures
+  are captured uniformly** alongside success and non-stream paths.
+  Intermediate streaming-chunk fires are deduplicated — exactly one
+  row per call.
+
+### Tests
+- 13 new unit tests in `tests/test_logger.py` covering: success/
+  failure rows, intermediate-chunk dedupe, dict-vs-pydantic response
+  shapes, async hook delegation, env-var path resolution,
+  `enable_local_logging` idempotency, and the module-level
+  `proxy_logger` singleton.
+
+### Verified e2e
+- **Mode A** — `enable_local_logging()` + `litellm.completion()`
+  writes one JSONL row per call (live BlockRun + LiteLLM 1.83.14).
+- **Mode B** — full chain `LiteLLM Proxy (4000) → BlockRun sidecar
+  (4001) → blockrun.ai` with `callbacks: ["custom_callbacks.blockrun_logger"]`
+  produces a row with `completion="Serendipity"`,
+  `usage={prompt_tokens:10, completion_tokens:4, total_tokens:14}`.
+
 ## 0.2.1 — 2026-05-12
 
 ### Improved
