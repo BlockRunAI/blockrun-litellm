@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.3 — 2026-05-13
+
+### Fixed
+- **Critical: sidecar (Mode B) Solana paid calls were silently routing
+  through the Base async client.** Caused
+  ``EncodingTypeError: Value 'EPjFW...' of type <class 'str'> cannot be
+  encoded by AddressEncoder`` when the EVM EIP-712 encoder met the
+  Solana USDC mint address (base58, not 0x-hex).
+
+  Root cause: ``_is_solana_url(api_url)`` only checked the function
+  argument, never the ``BLOCKRUN_API_URL`` env var. The FastAPI
+  sidecar's request handlers don't forward an ``api_url`` arg to the
+  adapter — they configure the chain via env var at startup
+  (``blockrun-litellm-proxy --api-url https://sol.blockrun.ai/api``).
+  So ``_is_solana_url(None)`` always returned ``False`` and routed
+  every request to ``AsyncLLMClient`` (Base) regardless of the
+  sidecar's actual chain. Mode A wasn't affected because callers pass
+  ``api_base`` explicitly.
+
+  Fix: ``_is_solana_url`` now falls back to ``BLOCKRUN_API_URL`` when
+  no argument is passed, so sidecar requests reach
+  ``AsyncSolanaLLMClient`` correctly.
+
+  Free-model calls escaped detection because they skip the payment
+  encoder entirely; only paid Solana calls hit the bug.
+
 ## 0.3.2 — 2026-05-12
 
 ### Fixed

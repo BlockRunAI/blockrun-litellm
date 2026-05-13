@@ -46,8 +46,17 @@ BASE_API_URL = "https://blockrun.ai/api"
 
 
 def _is_solana_url(api_url: Optional[str]) -> bool:
-    """Sniff whether an ``api_url`` points at the Solana gateway."""
-    return bool(api_url) and "sol.blockrun.ai" in api_url
+    """Sniff whether the effective gateway URL points at Solana.
+
+    Falls back to the ``BLOCKRUN_API_URL`` env var when no explicit
+    ``api_url`` is passed. This matters for the FastAPI sidecar: the
+    request handlers don't forward an ``api_url`` arg, so without the
+    env-var fallback we'd silently route Solana traffic to the Base
+    async client and crash inside the EVM payment encoder
+    (``eth_abi.AddressEncoder`` rejects base58 mint addresses).
+    """
+    resolved = api_url or os.environ.get("BLOCKRUN_API_URL", "")
+    return bool(resolved) and "sol.blockrun.ai" in resolved
 
 
 # ---------------------------------------------------------------------------
