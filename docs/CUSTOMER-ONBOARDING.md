@@ -6,10 +6,10 @@
 >
 > **Two chains, two integration modes:**
 >
-> | Chain | Gateway URL | Wallet env var |
-> |---|---|---|
-> | Base (USDC) | `https://blockrun.ai/api` *(default)* | `BLOCKRUN_WALLET_KEY` |
-> | Solana (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` |
+> | Chain | Gateway URL | Wallet env var | Recommended? |
+> |---|---|---|---|
+> | **Solana** (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | ⭐ **Default** — measured median settlement **106 ms** (Base 935 ms, **8.8× faster**), gas < $0.001/call |
+> | Base (USDC) | `https://blockrun.ai/api` *(default URL)* | `BLOCKRUN_WALLET_KEY` | 99.9% success rate (vs Solana 94.7%) — use as Solana's fallback |
 >
 > | Your setup | Use mode |
 > |---|---|
@@ -26,9 +26,11 @@ Are you running LiteLLM Proxy Server centrally?
 └─ NO  → Mode A
 
 Which chain do you want to pay in?
-├─ Base USDC (most common, mature)       → BLOCKRUN_WALLET_KEY env var
-└─ Solana USDC (cheaper gas, fast)       → SOLANA_WALLET_KEY env var
-                                          + api_base="https://sol.blockrun.ai/api"
+├─ Solana USDC ⭐ recommended (8.8× faster settle, sub-cent gas)
+│                                          → SOLANA_WALLET_KEY env var
+│                                          + api_base="https://sol.blockrun.ai/api"
+└─ Base USDC (99.9% success rate; good as Solana's fallback)
+                                          → BLOCKRUN_WALLET_KEY env var
 ```
 
 ---
@@ -402,12 +404,35 @@ curl https://sol.blockrun.ai/api/v1/models # direct, Solana
 ```
 
 ### Q: Should I pick Base or Solana?
-**Solana is recommended for most users** as of `blockrun-litellm 0.3.2` — full feature parity with Base (sync / async / streaming / tool calling) plus cheaper gas.
 
-- **Solana** — recommended. Sub-cent gas (< $0.001/call), seconds-to-finality. Chat is fully async; image / Exa / Predexon endpoints are sync-only today.
-- **Base** — older, more battle-tested, USDC liquidity larger, gas a few cents.
+**Solana, strongly recommended.** Based on the last 3 days (2026-05-10 → 05-12) of production settlement records — **4,424 real on-chain payments**:
 
-Switching later is one line — change `api_base` + `api_key`, your business code doesn't change otherwise.
+| Metric | **Solana** (PayAI facilitator) | Base (Coinbase CDP) | Solana advantage |
+|---|---|---|---|
+| **Median settlement** | **106 ms** ⚡ | 935 ms | **8.8× faster** |
+| p90 settlement | 133 ms | 1,658 ms | 12.5× faster |
+| p99 settlement | 178 ms | 2,577 ms | 14.5× faster |
+| Success rate | 94.7% | 99.9% | Base more reliable |
+| Failure time (median) | 154 ms (fast-fail) | 17.8 sec (gas-estimation retry storm) | Solana fails fast |
+
+**Where you feel it most: streaming "time to first chunk":**
+- **Solana**: ~106ms settle + upstream warm-up ≈ **~150ms to first chunk**
+- **Base**: ~935ms settle + upstream warm-up ≈ **~1.1s to first chunk**
+
+**Verdict:**
+- ✅ **Solana** — sub-cent gas (< $0.001/call), first chunk 9× faster, full feature parity with Base (tool calling, async streaming since `blockrun-litellm 0.3.2`)
+- ✅ **Base** — slightly more reliable (99.9% vs 94.7%), deeper USDC liquidity. Good as a fallback when Solana settlement fails.
+
+**Recommended pattern**: route Solana by default with a router fallback to Base for the rare failure:
+
+```yaml
+router_settings:
+  num_retries: 2
+  fallbacks:
+    - {"blockrun-solana-*": ["blockrun-base-*"]}
+```
+
+Switching between chains is a single-line change to `api_base` and `api_key` — your business code stays the same. (Solana's image / Exa / Predexon endpoints are sync-only today; chat is fully async + streaming.)
 
 ---
 

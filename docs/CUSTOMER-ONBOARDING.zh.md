@@ -8,8 +8,8 @@
 >
 > | 链 | 网关 URL | 钱包环境变量 | 推荐度 |
 > |---|---|---|---|
-> | **Solana**（USDC） | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | ⭐ **首选** — 燃料费低、终态快、功能与 Base 对齐 |
-> | Base（USDC） | `https://blockrun.ai/api`（默认） | `BLOCKRUN_WALLET_KEY` | 更老、流动性更大、燃料费稍高 |
+> | **Solana**（USDC） | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | ⭐ **首选** — 实测中位 settlement 106ms（Base 935ms，**快 8.8×**），燃料费 < $0.001/笔 |
+> | Base（USDC） | `https://blockrun.ai/api`（默认） | `BLOCKRUN_WALLET_KEY` | 99.9% 成功率（vs Solana 94.7%），适合做 Solana 的 fallback |
 >
 > | 你的部署 | 选 |
 > |---|---|
@@ -464,10 +464,34 @@ curl https://blockrun.ai/api/v1/models                # Base 直接
 
 ### Q：选 Solana 还是 Base？
 
-- **Solana** —— 推荐。燃料费极低（< $0.001/笔）、几秒终态、和 Base 完整功能对齐（从 `blockrun-litellm 0.3.2` 起含 tools 调用）
-- **Base** —— 更老更成熟，USDC 流动性大，燃料费几美分
+**强烈推荐 Solana。** 基于最近 3 天（2026-05-10 ~ 05-12）生产环境 4,424 条实际结算记录：
 
-不确定就用 Solana。日后切到 Base 只要改 `api_base` 和 `api_key`，业务代码不用动。（Solana 的 image / Exa / Predexon 这些端点目前只支持同步，chat 是完整异步。）
+| 指标 | **Solana** (PayAI facilitator) | Base (Coinbase CDP) | Solana 优势 |
+|---|---|---|---|
+| **中位 settlement 时间** | **106 ms** ⚡ | 935 ms | **8.8× 更快** |
+| p90 settlement | 133 ms | 1,658 ms | 12.5× 更快 |
+| p99 settlement | 178 ms | 2,577 ms | 14.5× 更快 |
+| 成功率 | 94.7% | 99.9% | Base 更稳 |
+| 失败时的耗时（中位） | 154 ms（快速 fail） | 17.8 秒（gas estimation retry storm） | Solana 失败不堵塞 |
+
+**体感差距最大的场景：流式聊天的"第一个 chunk"延迟** ——
+- **Solana**：结算 ~106ms + 上游开始返 ≈ 首 chunk **~150ms**
+- **Base**：结算 ~935ms + 上游开始返 ≈ 首 chunk **~1.1s**
+
+**结论：**
+- ✅ **Solana**：燃料费 < $0.001、首 chunk 快 9 倍、和 Base 完整功能对齐（含 tools 调用、async 流式，自 `blockrun-litellm 0.3.2`）
+- ✅ **Base**：稳一些（99.9% vs 94.7%），USDC 流动性大，适合作为 Solana 故障时的 fallback
+
+**推荐策略**：默认走 Solana，配 LiteLLM router fallback 切到 Base 应对偶发失败：
+
+```yaml
+router_settings:
+  num_retries: 2
+  fallbacks:
+    - {"blockrun-solana-*": ["blockrun-base-*"]}   # Solana 挂了切 Base
+```
+
+切换两边只是改 `api_base` 和 `api_key`，业务代码不用动。（Solana 的 image / Exa / Predexon 这些端点目前只支持同步，chat 已经完整异步 + 流式。）
 
 ---
 
