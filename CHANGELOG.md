@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.4 — 2026-05-14
+
+### Changed
+- **Dependency bump:** `blockrun-llm>=0.24.0` (`solana` extra:
+  `blockrun-llm[solana]>=0.24.0`). The new SDK switches the default
+  Solana RPC endpoint to BlockRun's own multi-region Tatum-backed
+  proxy (`https://sol.blockrun.ai/api/v1/solana/rpc`) — partners no
+  longer need to register their own Helius / Tatum / QuickNode
+  account. See `blockrun-llm 0.24.0` changelog for the migration
+  details. Zero code change in this adapter for the change to take
+  effect; just upgrade and the default URL flows through.
+
+### Verified e2e
+- `litellm.completion(model="blockrun/zai/glm-5.1", api_base="https://sol.blockrun.ai/api", api_key=<solana_key>)`
+  — paid Solana settlement succeeded, $0.001 USDC debited on-chain,
+  cost log recorded `network=solana-mainnet` /
+  `client=SolanaLLMClient`. Blockhash fetched via the BlockRun
+  proxy (no partner-side RPC config needed).
+
 ## 0.3.3 — 2026-05-13
 
 ### Fixed
