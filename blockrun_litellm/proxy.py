@@ -29,6 +29,7 @@ CLI
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -49,6 +50,23 @@ from blockrun_llm.types import APIError, PaymentError
 from blockrun_litellm import _adapter
 
 log = logging.getLogger("blockrun_litellm.proxy")
+
+# Limit concurrent in-flight requests to avoid saturating upstream rate limits.
+# Anthropic (claude-opus-*) has strict TPM/RPM caps — 100 simultaneous requests
+# all with 8 K default max_tokens will immediately exceed them and cause 500s.
+# Override with env var BLOCKRUN_MAX_CONCURRENT (int, default 20).
+_MAX_CONCURRENT: int = int(os.environ.get("BLOCKRUN_MAX_CONCURRENT", "20"))
+_concurrency_sem: asyncio.Semaphore  # initialised in lifespan / lazily on first use
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _concurrency_sem
+    try:
+        return _concurrency_sem
+    except NameError:
+        _concurrency_sem = asyncio.Semaphore(_MAX_CONCURRENT)
+        return _concurrency_sem
+
 
 app = FastAPI(
     title="blockrun-litellm proxy",
@@ -104,6 +122,27 @@ async def list_models() -> Dict[str, Any]:
     }
 
 
+def _openai_error_event(message: str, code: int = 500) -> str:
+    """Render an error as an SSE ``data:`` line in OpenAI's error schema.
+
+    The openai Python SDK (v1.x, Rust parser) recognises ``{"error": {...}}``
+    streaming events only when the nested object uses OpenAI's exact field
+    names: ``message``, ``type``, ``param``, ``code``.  Non-conforming shapes
+    (e.g. a ``status`` key instead of ``code``) cause the Rust untagged-enum
+    parser to fail with "data did not match any variant", which LiteLLM then
+    wraps as a confusing ``MidStreamFallbackError``.
+    """
+    payload = {
+        "error": {
+            "message": message,
+            "type": "upstream_error",
+            "param": None,
+            "code": str(code),
+        }
+    }
+    return f"data: {_json.dumps(payload)}\n\n"
+
+
 async def _sse_event_stream(
     model: str,
     messages: List[Dict[str, Any]],
@@ -117,18 +156,19 @@ async def _sse_event_stream(
     ``data: {"error": ...}`` event before the [DONE], since headers
     have already been flushed.
     """
-    try:
-        async for chunk in _adapter.chat_completion_stream_async(
-            model=model, messages=messages, **openai_kwargs
-        ):
-            yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
-    except PaymentError as exc:
-        yield f"data: {_json.dumps({'error': {'type': 'payment_required', 'message': str(exc)}})}\n\n"
-    except APIError as exc:
-        yield f"data: {_json.dumps({'error': {'type': 'upstream_error', 'message': str(exc), 'status': getattr(exc, 'status_code', None)}})}\n\n"
-    except Exception as exc:  # pragma: no cover - defensive
-        log.exception("stream error")
-        yield f"data: {_json.dumps({'error': {'type': 'internal_error', 'message': str(exc)}})}\n\n"
+    async with _get_semaphore():
+        try:
+            async for chunk in _adapter.chat_completion_stream_async(
+                model=model, messages=messages, **openai_kwargs
+            ):
+                yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
+        except PaymentError as exc:
+            yield _openai_error_event(str(exc), code=402)
+        except APIError as exc:
+            yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("stream error")
+            yield _openai_error_event(str(exc), code=500)
     yield "data: [DONE]\n\n"
 
 
@@ -163,17 +203,18 @@ async def chat_completions(request: Request) -> Any:
             },
         )
 
-    try:
-        payload = await _adapter.chat_completion_async(
-            model=model,
-            messages=messages,
-            **openai_kwargs,
-        )
-    except PaymentError as exc:
-        raise HTTPException(402, str(exc))
-    except APIError as exc:
-        status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-        return JSONResponse(status_code=status, content={"error": str(exc)})
+    async with _get_semaphore():
+        try:
+            payload = await _adapter.chat_completion_async(
+                model=model,
+                messages=messages,
+                **openai_kwargs,
+            )
+        except PaymentError as exc:
+            raise HTTPException(402, str(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
 
     return payload
 

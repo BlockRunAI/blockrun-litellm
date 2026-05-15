@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.5 — 2026-05-15
+
+### Fixed
+
+- **Sidecar proxy: `MidStreamFallbackError` on paid models under concurrent load.**
+  Two root causes, both fixed:
+
+  1. **Wrong SSE error format.** When BlockRun's upstream returned a 5xx
+     mid-stream, the sidecar embedded the error as
+     `data: {"error": {"type": ..., "status": ...}}`.  The `openai` Python SDK
+     (v1.x, Rust parser) only recognises error events that follow OpenAI's
+     exact schema: `{"error": {"message", "type", "param", "code"}}`.  The
+     non-conforming `"status"` key caused the Rust untagged-enum parser to fail
+     with *"data did not match any variant of untagged enum Resp"*, which
+     LiteLLM then wrapped as a confusing `MidStreamFallbackError`.  Fixed by
+     adding `_openai_error_event()` that always emits the correct four-field
+     schema.
+
+  2. **No concurrency cap.** 100 simultaneous requests to a paid model like
+     `claude-opus-4.7` all signed x402 payments and hit the Anthropic upstream
+     concurrently, exhausting its TPM/RPM limits and causing 500s.  The sidecar
+     now acquires an `asyncio.Semaphore` before each request (streaming and
+     non-streaming alike), limiting in-flight requests to `BLOCKRUN_MAX_CONCURRENT`
+     (default 20, configurable via env var).  Excess requests queue inside the
+     sidecar rather than flooding the upstream.
+
+### Added
+
+- `BLOCKRUN_MAX_CONCURRENT` env var — set on the sidecar to tune the
+  concurrency cap.  Default is 20, which keeps Anthropic's paid-tier limits
+  comfortable.  Free models (e.g. `nvidia/deepseek-v4-flash`) are not subject
+  to Anthropic's caps so you can raise this for free-only workloads.
+
 ## 0.3.4 — 2026-05-14
 
 ### Changed
