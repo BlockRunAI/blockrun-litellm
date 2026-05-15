@@ -26,14 +26,14 @@ classifiers = [
 ]
 
 dependencies = [
-    "blockrun-llm>=0.24.0",
+    "blockrun-llm>=0.24.1",
     "litellm>=1.40.0",
 ]
 
 [project.optional-dependencies]
 # Re-exported here so `pip install 'blockrun-litellm[solana]'` pulls the
 # x402 SVM toolchain that SolanaLLMClient needs (x402 SDK + solders).
-solana = ["blockrun-llm[solana]>=0.24.0"]
+solana = ["blockrun-llm[solana]>=0.24.1"]
 proxy = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
