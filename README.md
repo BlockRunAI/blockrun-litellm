@@ -189,9 +189,15 @@ model_list:
       api_base: http://localhost:4001/v1
       api_key: "dummy"                # ignored if BLOCKRUN_PROXY_TOKEN is unset
 
-  - model_name: claude-opus-4-5
+  - model_name: claude-opus-4-7
     litellm_params:
-      model: openai/anthropic/claude-opus-4-5
+      model: openai/anthropic/claude-opus-4-7
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+
+  - model_name: gemini-3.1-pro
+    litellm_params:
+      model: openai/google/gemini-3.1-pro
       api_base: http://localhost:4001/v1
       api_key: "dummy"
 

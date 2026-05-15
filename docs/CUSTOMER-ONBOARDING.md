@@ -1,7 +1,7 @@
 # BlockRun × LiteLLM — 5-minute onboarding for customers
 
-> Verified end-to-end on 2026-05-12 with `litellm 1.83.x`,
-> `blockrun-litellm 0.3.2`, `blockrun-llm 0.22.1`, Python 3.13.
+> Verified end-to-end on 2026-05-15 with `litellm 1.83.x`,
+> `blockrun-litellm 0.3.5`, `blockrun-llm 0.24.1`, Python 3.13.
 > Every command below was actually run; the outputs are real.
 >
 > **Two chains, two integration modes:**
@@ -334,7 +334,7 @@ So your existing LiteLLM router config — `num_retries`, `fallbacks`, `cooldown
 router_settings:
   num_retries: 2
   fallbacks:
-    - {"gpt-5.5-base": ["claude-opus-4-5"]}
+    - {"gpt-5.5-base": ["claude-opus-4-7"]}
 ```
 
 Plus the SDK itself retries 5xx in-band 3 times with exponential backoff (1s / 2s / 4s) before bubbling the error up.

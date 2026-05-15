@@ -1,7 +1,7 @@
 # LiteLLM Proxy + BlockRun —— 完整部署（含 UI）
 
-> 实测日期：2026-05-12，macOS，Python 3.13，Docker Desktop 28.4，
-> LiteLLM 1.83.x，blockrun-litellm 0.3.2，blockrun-llm 0.22.1。
+> 实测日期：2026-05-15，macOS，Python 3.13，Docker Desktop 28.4，
+> LiteLLM 1.83.x，blockrun-litellm 0.3.5，blockrun-llm 0.24.1。
 > 下面每条命令都是真人跑过、输出真实贴出。
 >
 > 这份是**完整部署**：LiteLLM Proxy Server + 管理 UI、Postgres 存
@@ -202,9 +202,9 @@ model_list:
       api_base: http://127.0.0.1:4001/v1      # ← BlockRun sidecar
       api_key: "dummy"                        # 不用；sidecar 负责认证
 
-  - model_name: claude-opus-4-5
+  - model_name: claude-opus-4-7
     litellm_params:
-      model: openai/anthropic/claude-opus-4-5
+      model: openai/anthropic/claude-opus-4-7
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
@@ -214,9 +214,9 @@ model_list:
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
-  - model_name: gemini-3-pro
+  - model_name: gemini-3.1-pro
     litellm_params:
-      model: openai/google/gemini-3-pro
+      model: openai/google/gemini-3.1-pro
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
@@ -263,9 +263,9 @@ litellm --config config.yaml --port 4000 --host 127.0.0.1
    ...
 LiteLLM: Proxy initialized with Config, Set models:
     gpt-5.5
-    claude-opus-4-5
+    claude-opus-4-7
     deepseek-v4-flash
-    gemini-3-pro
+    gemini-3.1-pro
 INFO:     Uvicorn running on http://127.0.0.1:4000
 ```
 

@@ -1,7 +1,7 @@
 # BlockRun × LiteLLM — 5 分钟上手指南
 
-> 验证日期：2026-05-12
-> 版本：`litellm 1.83.x`、`blockrun-litellm 0.3.2`、`blockrun-llm 0.22.1`、Python 3.13
+> 验证日期：2026-05-15
+> 版本：`litellm 1.83.x`、`blockrun-litellm 0.3.5`、`blockrun-llm 0.24.1`、Python 3.13
 > 下面每一行命令都是真实跑过的，输出是实测结果
 >
 > **两条链 + 两种集成模式：**
@@ -233,9 +233,9 @@ model_list:
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
-  - model_name: claude-opus-4-5
+  - model_name: claude-opus-4-7
     litellm_params:
-      model: openai/anthropic/claude-opus-4-5
+      model: openai/anthropic/claude-opus-4-7
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
@@ -388,7 +388,7 @@ LiteLLM router 配置直接生效：
 router_settings:
   num_retries: 2
   fallbacks:
-    - {"gpt-5.5": ["claude-opus-4-5"]}   # gpt-5.5 出 503 自动切 claude
+    - {"gpt-5.5": ["claude-opus-4-7"]}   # gpt-5.5 出 503 自动切 claude
 ```
 
 SDK 自身也会做 5xx 退避重试 3 次（1s / 2s / 4s），大部分临时抖动都自愈了。
