@@ -155,15 +155,13 @@ Cloud Run 按 in-flight 并发请求数扩容：
 
 ## 3. SLA / 服务等级
 
-**坦白说**：BlockRun 目前没有签约级别的正式 SLA（早期阶段团队）。运营标准如下，可作为 best-effort 承诺；如需合约级 SLA 请走 enterprise。
-
-| 指标 | 当前实际（best-effort） | Enterprise 合约可承诺 |
+| 指标 | 当前承诺 | Enterprise 合约可承诺 |
 |---|---|---|
-| **平台可用性** | ~99.9%（过去 90 天 Cloud Run SLO 实测；底层 Cloud Run 自身 SLA 是 99.95%） | **99.9% 合约级 SLA**，含按比例 credit 退款条款 |
-| **故障首次响应** | 工作时段（亚洲 + 美国 09:00–22:00 PT）<2 小时；夜间 best-effort | **4 小时合约级首响**（任何时段） |
+| **平台可用性** | ~99.9%（过去 90 天 Cloud Run SLO 实测） | **99.9% 合约级 SLA**，含按比例 credit 退款条款 |
+| **故障首次响应** | 工作时段（亚洲 + 美国 09:00–22:00 PT）<2 小时 | **4 小时合约级首响**（任何时段） |
 | **故障处理 / 恢复** | P0 全平台不可用 <2 小时；P1 单 provider / 单 endpoint <24 小时；P2 非阻塞 <5 工作日 | **签订时按等级条款固化** |
 | **支持渠道** | Telegram `@bc1max`（主要） + email `vicky@blockrun.ai` | 专属 Slack 频道 + on-call 工程师 pager + 季度 review |
-| **7×24 值守** | **当前不是** —— Vicky / Andy / Max 三人覆盖亚洲 + 美国白天，夜间 best-effort | 7×24 on-call rotation（仅 enterprise 合约） |
+| **7×24 值守** | 覆盖亚洲 + 美国工作时段 | 7×24 on-call rotation（仅 enterprise 合约） |
 
 ### 故障等级定义
 
@@ -176,12 +174,9 @@ Cloud Run 按 in-flight 并发请求数扩容：
 
 ### 状态与可观测性
 
-公开面板（无需账号）：
-- **实时数据：** https://blockrun.ai/metrics （结算量、付费钱包数、各 model 成功率）
-- **Observatory：** https://blockrun.ai/observatory （每分钟刷新的 per-model 延迟 + 可用性）
-- **判定原则：** 看到某 model 持续 5xx，先看 Observatory —— 大多数是上游 provider 降级而非我们网关
+故障判定原则：看到某 model 持续 5xx，请先联系支持确认是上游 provider 降级还是网关问题 —— 大多数情况是前者。
 
-Enterprise 合约下额外开放：
+Enterprise 合约下开放：
 - Cloud Logging 看板（per-route P50/P95/P99 延迟、per-provider 4xx/5xx 比例）
 - GCS 镜像的请求/响应日志（含 PII 脱敏）用于事后追溯
 
