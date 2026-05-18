@@ -14,7 +14,7 @@
 
 ## 1. 限流标准（QPS / RPM / TPM / TPH）
 
-**BlockRun 平台层不设 QPS / RPM / TPM / TPH 配额。** 我们是 pay-per-call 模型，付费即用，没有按月调用配额。有效限流来自**上游 provider 的—**，按 **provider 区分**（不按 model 区分）。
+**BlockRun 平台层不设 QPS / RPM / TPM / TPH 配额。** 我们是 pay-per-call 模型，付费即用，没有按月调用配额。有效限流由**上游 provider 的限流上限**决定，按 **provider 区分**（不按 model 区分）。
 
 ### 各 provider 的参考限流
 
@@ -65,11 +65,9 @@
 ### 需要保证 QPS / TPM？
 
 走 enterprise 路径：
-- **专属 key pool**（独占 OpenAI / Anthropic / Google 等 key，不和共享池竞争）
+- **专属容量**（独占 OpenAI / Anthropic / Google 等 provider 容量，保证不被其他流量影响）
 - **预留 provider TPM / RPM**（向 provider 加预付保留容量，写入合约）
 - **自定义 429 行为**（白名单 IP 永不被限）
-
-完整规则：https://blockrun.ai/docs/api-reference/rate-limits
 
 ---
 
@@ -185,7 +183,7 @@ Enterprise 合约下开放：
 如贵团队的生产部署需要：
 - 99.9% 合约级 SLA + 退款条款
 - 7×24 on-call
-- 专属 key pool / 保留 provider TPM
+- 专属容量 / 保留 provider TPM
 - 专属 Slack channel + 季度 review
 - VPC peering / 自托管选项
 
@@ -199,4 +197,3 @@ Enterprise 合约下开放：
 
 - [CUSTOMER-ONBOARDING.zh.md](./CUSTOMER-ONBOARDING.zh.md) — 5 分钟把 BlockRun 接入 LiteLLM
 - [PROXY-FULL-SETUP.zh.md](./PROXY-FULL-SETUP.zh.md) — LiteLLM Proxy Server + UI 完整部署
-- [限流英文版（公开）](https://blockrun.ai/docs/api-reference/rate-limits) — Rate Limits docs
