@@ -29,6 +29,10 @@
 | xAI (Grok) | ~3,000 | ~1M | 共享 key pool |
 | Moonshot / MiniMax / ZAI | 各家差异 | 各家差异 | 当前流量远低于上限 |
 | NVIDIA（免费 model） | ~60 RPM per IP | — | NVIDIA 侧按源 IP 限流，高并发建议改用付费 model |
+| Google（图像：nano-banana / nano-banana-pro） | ~60 RPM | 不适用 | 共享 key pool；生图耗时 3–8 秒，实际并发受单次生成时长限制 |
+| OpenAI（图像：dall-e-3 / gpt-image-1/2） | ~50 RPM | 不适用 | 共享 key pool |
+| xAI（图像：grok-imagine） | ~60 RPM | 不适用 | 共享 key pool |
+| ZAI（图像：cogview-4） | 按 provider | 不适用 | 共享 key pool |
 | token360（视频） | 按 model 不同 | 按 model 不同 | Seedance 异步生成，限流通常表现为排队等待而非 429 |
 | Suno（音乐） | 按 provider | 不适用 | 按任务配额 |
 | Bland.ai（语音） | 按 provider | 不适用 | 按账户并发上限 |
@@ -71,7 +75,14 @@
 
 ## 2. 部署 / 扩容时长
 
-部署架构：GCP Cloud Run（serverless container），us-central1，前端 Cloud Load Balancer + CDN。所有容量调整都是零中断。
+部署架构：GCP Cloud Run（serverless container），前端 Cloud Load Balancer + CDN。所有容量调整都是零中断。
+
+**两套网关，分别部署：**
+
+| 网关 | 链 | Region |
+|---|---|---|
+| `blockrun.ai` | Base（USDC on Base） | us-central1（单 region） |
+| `sol.blockrun.ai` | Solana（USDC on Solana） | us-central1 + **asia-northeast1**（双 region，Anycast LB 就近路由） |
 
 ### 操作与时长表
 
@@ -118,16 +129,27 @@ Cloud Run 按 in-flight 并发请求数扩容：
 | 上游 provider 吞吐 | 受限于各家 RPM/TPM（见第 1 节）|
 | 构建队列并行度 | 1 个环境同时只 ship 一次 |
 
-### 地理延迟（单 region 当前部署）
+### 地理延迟
 
-| 起源地 | 到 blockrun.ai 中位延迟 |
+**blockrun.ai（Base，单 region us-central1）：**
+
+| 起源地 | 中位延迟 |
 |---|---|
 | 美国 | 20–60 ms |
 | 西欧 | 110–140 ms |
 | 亚洲 HK / SG / JP | 180–230 ms |
 | 亚洲 KR / CN | 200–260 ms |
 
-亚太或欧洲延迟敏感的部署 → enterprise 合约可加 `asia-northeast1` / `europe-west4` 副本，Anycast LB 自动就近。
+**sol.blockrun.ai（Solana，双 region us-central1 + asia-northeast1）：**
+
+| 起源地 | 中位延迟 |
+|---|---|
+| 美国 | 20–60 ms |
+| 西欧 | 110–140 ms |
+| 亚洲 HK / SG / JP / KR | **30–60 ms**（asia-northeast1 就近） |
+| 亚洲 CN | 60–120 ms |
+
+欧洲延迟敏感部署 → enterprise 合约可加 `europe-west4` 副本，Anycast LB 自动就近。
 
 ---
 

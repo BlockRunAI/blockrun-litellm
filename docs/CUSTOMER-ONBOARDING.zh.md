@@ -367,6 +367,7 @@ print(by_model.most_common())
 | `~/.blockrun/cost_log.jsonl` | 付费 USDC 成本审计（SDK 写） | 不可改 |
 | `~/.blockrun/data/*.json` | 付费调用的完整请求/响应归档（SDK 写） | 不可改 |
 | `BLOCKRUN_PROXY_TOKEN`（env） | sidecar 可选的共享密钥 | 是 |
+| `BLOCKRUN_MAX_CONCURRENT`（env） | sidecar 向上游最大并发请求数（默认 `20`）。超出的请求在 sidecar 内排队；仅 Anthropic Tier 4+ 账号建议调到 `50` 以上。 | 是 |
 
 ---
 

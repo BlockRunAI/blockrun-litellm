@@ -170,6 +170,13 @@ Flags:
 | `--api-url` | `https://blockrun.ai/api` | Override BlockRun gateway endpoint |
 | `--log-level` | `info` | `critical`/`error`/`warning`/`info`/`debug`/`trace` |
 
+Environment variables (no CLI flag):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BLOCKRUN_MAX_CONCURRENT` | `20` | Max in-flight requests. Excess requests queue inside the sidecar. Raise to `50`+ only if you have Anthropic Tier 4+ limits; paid models (Claude Opus, Gemini Pro) fail fast above their upstream RPM. |
+| `BLOCKRUN_PROXY_TOKEN` | *(unset)* | Optional Bearer token guard on all sidecar endpoints. |
+
 Optional shared-secret guard:
 
 ```bash
@@ -360,6 +367,7 @@ litellm_settings:
 | `~/.blockrun/cost_log.jsonl` | USDC cost audit for paid calls (SDK) | — |
 | `~/.blockrun/data/*.json` | Full request/response archive for paid calls (SDK) | — |
 | `BLOCKRUN_PROXY_TOKEN` (env) | Optional shared-secret guard on sidecar | yes |
+| `BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests to upstream (default `20`) | yes |
 
 ---
 

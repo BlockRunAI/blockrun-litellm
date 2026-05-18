@@ -313,6 +313,7 @@ litellm_settings:
 | `~/.blockrun/cost_log.jsonl` | Per-paid-call USDC cost audit (`blockrun-llm` SDK) | not configurable |
 | `~/.blockrun/data/*.json` | Full request/response archive for paid calls | not configurable |
 | `$BLOCKRUN_PROXY_TOKEN` (env) | Optional shared-secret guard on the sidecar | yes |
+| `$BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests the sidecar sends upstream (default `20`). Excess requests queue; raise to `50`+ only for Anthropic Tier 4+ accounts. | yes |
 
 ---
 
