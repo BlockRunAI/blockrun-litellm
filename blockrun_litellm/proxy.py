@@ -7,9 +7,10 @@ key lives in this process — clients on the same host never see it.
 
 Endpoints
 ---------
-- ``POST /v1/chat/completions`` — OpenAI Chat Completions
-- ``GET  /v1/models``           — passthrough to BlockRun's catalog
-- ``GET  /healthz``             — liveness probe (no upstream call)
+- ``POST /v1/chat/completions``    — OpenAI Chat Completions
+- ``POST /v1/images/generations``  — OpenAI Image Generations (DALL-E compatible)
+- ``GET  /v1/models``              — passthrough to BlockRun's chat catalog
+- ``GET  /healthz``                — liveness probe (no upstream call)
 
 Auth
 ----
@@ -217,6 +218,38 @@ async def chat_completions(request: Request) -> Any:
             return JSONResponse(status_code=status, content={"error": str(exc)})
 
     return payload
+
+
+@app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
+async def image_generations(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    prompt = body.get("prompt")
+    if not prompt:
+        raise HTTPException(400, "`prompt` is required")
+
+    model: Optional[str] = body.get("model")
+    size: Optional[str] = body.get("size")
+    n: int = int(body.get("n", 1))
+
+    async with _get_semaphore():
+        try:
+            result = await _adapter.image_generation_async(
+                prompt=prompt,
+                model=model,
+                size=size,
+                n=n,
+            )
+        except PaymentError as exc:
+            raise HTTPException(402, str(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+
+    return result
 
 
 # ---------------------------------------------------------------------------

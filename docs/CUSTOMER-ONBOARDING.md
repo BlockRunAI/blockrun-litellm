@@ -363,6 +363,45 @@ litellm.completion(
 
 ---
 
+## Image generation (since 0.3.6)
+
+The sidecar proxy now exposes `POST /v1/images/generations` (OpenAI-compatible).
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
+resp = client.images.generate(
+    model="google/nano-banana",
+    prompt="a corgi astronaut on the moon",
+    size="1024x1024",
+)
+print(resp.data[0].url)
+```
+
+```bash
+curl http://localhost:4001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "google/nano-banana", "prompt": "a corgi astronaut", "size": "1024x1024"}'
+```
+
+Available image models: `google/nano-banana`, `google/nano-banana-pro`, `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2`, `xai/grok-imagine-image`, `xai/grok-imagine-image-pro`, `zai/cogview-4`.
+
+LiteLLM `image_generation()` also works — point it at the sidecar:
+
+```python
+import litellm
+resp = litellm.image_generation(
+    model="openai/google/nano-banana",
+    prompt="a corgi astronaut",
+    api_base="http://localhost:4001/v1",
+    api_key="dummy",
+)
+print(resp.data[0].url)
+```
+
+---
+
 ## Frequently-asked
 
 ### Q: Do I need an OpenAI / Anthropic / Google API key?
@@ -432,7 +471,7 @@ router_settings:
     - {"blockrun-solana-*": ["blockrun-base-*"]}
 ```
 
-Switching between chains is a single-line change to `api_base` and `api_key` — your business code stays the same. (Solana's image / Exa / Predexon endpoints are sync-only today; chat is fully async + streaming.)
+Switching between chains is a single-line change to `api_base` and `api_key` — your business code stays the same. (Exa / Predexon endpoints are sync-only today; chat and image are fully async.)
 
 ---
 

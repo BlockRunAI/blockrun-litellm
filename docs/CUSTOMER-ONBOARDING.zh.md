@@ -417,6 +417,45 @@ litellm.completion(
 
 ---
 
+## 图像生成（0.3.6 起）
+
+Sidecar proxy 现在暴露 `POST /v1/images/generations`（OpenAI 协议兼容）。
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
+resp = client.images.generate(
+    model="google/nano-banana",
+    prompt="一只穿着宇航服的柯基",
+    size="1024x1024",
+)
+print(resp.data[0].url)
+```
+
+```bash
+curl http://localhost:4001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "google/nano-banana", "prompt": "一只穿着宇航服的柯基", "size": "1024x1024"}'
+```
+
+可用图像模型：`google/nano-banana`、`google/nano-banana-pro`、`openai/dall-e-3`、`openai/gpt-image-1`、`openai/gpt-image-2`、`xai/grok-imagine-image`、`xai/grok-imagine-image-pro`、`zai/cogview-4`。
+
+LiteLLM `image_generation()` 同样支持，指向 sidecar 即可：
+
+```python
+import litellm
+resp = litellm.image_generation(
+    model="openai/google/nano-banana",
+    prompt="一只穿着宇航服的柯基",
+    api_base="http://localhost:4001/v1",
+    api_key="dummy",
+)
+print(resp.data[0].url)
+```
+
+---
+
 ## 常见问题
 
 ### Q：还需要 OpenAI / Anthropic / Google 的 API key 吗？
@@ -491,7 +530,7 @@ router_settings:
     - {"blockrun-solana-*": ["blockrun-base-*"]}   # Solana 挂了切 Base
 ```
 
-切换两边只是改 `api_base` 和 `api_key`，业务代码不用动。（Solana 的 image / Exa / Predexon 这些端点目前只支持同步，chat 已经完整异步 + 流式。）
+切换两边只是改 `api_base` 和 `api_key`，业务代码不用动。（Exa / Predexon 端点目前只支持同步；chat 和 image 均已完整支持异步 + 流式。）
 
 ---
 

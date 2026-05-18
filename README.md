@@ -250,9 +250,33 @@ curl http://localhost:4001/v1/chat/completions \
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
+| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
+
+### 2e. Image generation
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
+resp = client.images.generate(
+    model="google/nano-banana",
+    prompt="a corgi astronaut on the moon",
+    size="1024x1024",
+    n=1,
+)
+print(resp.data[0].url)
+```
+
+```bash
+curl http://localhost:4001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "google/nano-banana", "prompt": "a corgi astronaut", "size": "1024x1024"}'
+```
+
+Available image models: `google/nano-banana`, `google/nano-banana-pro`, `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2`, `xai/grok-imagine-image`, `xai/grok-imagine-image-pro`, `zai/cogview-4`.
 
 ---
 

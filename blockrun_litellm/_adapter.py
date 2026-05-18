@@ -23,11 +23,12 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
-from blockrun_llm import AsyncLLMClient, LLMClient
+from blockrun_llm import AsyncLLMClient, ImageClient, LLMClient
 from blockrun_llm.types import APIError, ChatCompletionChunk, PaymentError
 
 try:
@@ -69,6 +70,7 @@ def _is_solana_url(api_url: Optional[str]) -> bool:
 
 _sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}
+_image_clients: Dict[str, ImageClient] = {}
 _lock = threading.Lock()
 
 
@@ -284,6 +286,56 @@ async def chat_completion_stream_async(
         yield chunk
 
 
+# ---------------------------------------------------------------------------
+# Image generation
+# ---------------------------------------------------------------------------
+# ImageClient is sync-only in blockrun-llm; async callers run it in a thread.
+
+
+def get_image_client(
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> ImageClient:
+    key = _client_key(api_url, private_key)
+    with _lock:
+        client = _image_clients.get(key)
+        if client is None:
+            client = ImageClient(private_key=private_key, api_url=api_url)
+            _image_clients[key] = client
+        return client
+
+
+def image_generation_sync(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    size: Optional[str] = None,
+    n: int = 1,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    client = get_image_client(api_url=api_url, private_key=private_key)
+    response = client.generate(prompt, model=model, size=size, n=n)
+    return response.model_dump(exclude_none=True)
+
+
+async def image_generation_async(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    size: Optional[str] = None,
+    n: int = 1,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    client = get_image_client(api_url=api_url, private_key=private_key)
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None, lambda: client.generate(prompt, model=model, size=size, n=n)
+    )
+    return response.model_dump(exclude_none=True)
+
+
 __all__ = [
     "chat_completion_sync",
     "chat_completion_async",
@@ -291,6 +343,9 @@ __all__ = [
     "chat_completion_stream_async",
     "get_sync_client",
     "get_async_client",
+    "get_image_client",
+    "image_generation_sync",
+    "image_generation_async",
     "APIError",
     "PaymentError",
 ]

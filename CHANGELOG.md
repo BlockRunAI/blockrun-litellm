@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6 — 2026-05-18
+
+### Added
+
+- **`POST /v1/images/generations` endpoint in the sidecar proxy.**
+  The proxy now exposes an OpenAI-compatible image generation endpoint.
+  Accepts `prompt`, `model`, `size`, `n`; returns OpenAI `ImageResponse`
+  format (`created` + `data[].url`). Supports any model in BlockRun's
+  image catalog: `google/nano-banana`, `google/nano-banana-pro`,
+  `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2`,
+  `xai/grok-imagine-image`, `zai/cogview-4`, etc.
+  Uses `ImageClient` under the hood (sync, run via thread executor for
+  async compatibility). Cached per wallet/url like all other clients.
+
 ## 0.3.5 — 2026-05-15
 
 ### Fixed

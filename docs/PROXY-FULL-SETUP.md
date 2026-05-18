@@ -339,6 +339,27 @@ curl http://127.0.0.1:4000/v1/chat/completions \
 
 Expected: `text/event-stream` response with a couple of `data: {...}` chunks and a terminating `data: [DONE]`.
 
+**Image generation** (sidecar directly, since v0.3.6):
+
+```bash
+curl http://127.0.0.1:4001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "google/nano-banana", "prompt": "a corgi astronaut", "size": "1024x1024"}'
+```
+
+Or via LiteLLM:
+
+```python
+import litellm
+resp = litellm.image_generation(
+    model="openai/google/nano-banana",
+    prompt="a corgi astronaut",
+    api_base="http://127.0.0.1:4001/v1",
+    api_key="dummy",
+)
+print(resp.data[0].url)
+```
+
 Then check the local JSONL log appended:
 
 ```bash
@@ -516,7 +537,9 @@ Before you point real customers at this:
 | Service | URL | What |
 |---|---|---|
 | BlockRun sidecar healthz | http://127.0.0.1:4001/healthz | should return `{"status":"ok"}` |
-| BlockRun sidecar API | http://127.0.0.1:4001/v1 | OpenAI-compatible; signs x402 |
+| BlockRun sidecar chat | http://127.0.0.1:4001/v1/chat/completions | chat completions; signs x402 |
+| BlockRun sidecar images | http://127.0.0.1:4001/v1/images/generations | image generation (since 0.3.6) |
+| BlockRun sidecar models | http://127.0.0.1:4001/v1/models | chat model catalog |
 | LiteLLM Proxy health | http://127.0.0.1:4000/health/liveliness | `{"status":"healthy"}` |
 | LiteLLM Proxy API | http://127.0.0.1:4000/v1 | what your apps hit |
 | LiteLLM Proxy UI | http://127.0.0.1:4000/ui/ | admin dashboard |

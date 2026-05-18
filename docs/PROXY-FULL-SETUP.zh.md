@@ -320,6 +320,27 @@ curl http://127.0.0.1:4000/v1/chat/completions \
 
 预期：`text/event-stream` 响应，几个 `data: {...}` chunks 加 `data: [DONE]`。
 
+**图像生成**（直接打 sidecar，v0.3.6 起）：
+
+```bash
+curl http://127.0.0.1:4001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "google/nano-banana", "prompt": "一只穿着宇航服的柯基", "size": "1024x1024"}'
+```
+
+或通过 LiteLLM：
+
+```python
+import litellm
+resp = litellm.image_generation(
+    model="openai/google/nano-banana",
+    prompt="一只穿着宇航服的柯基",
+    api_base="http://127.0.0.1:4001/v1",
+    api_key="dummy",
+)
+print(resp.data[0].url)
+```
+
 然后查日志：
 
 ```bash
@@ -471,7 +492,9 @@ env | grep BLOCKRUN_LITELLM_LOG
 | 服务 | URL | 内容 |
 |---|---|---|
 | BlockRun sidecar 健康检查 | http://127.0.0.1:4001/healthz | `{"status":"ok"}` |
-| BlockRun sidecar API | http://127.0.0.1:4001/v1 | OpenAI 兼容 + x402 签名 |
+| BlockRun sidecar chat | http://127.0.0.1:4001/v1/chat/completions | 对话补全，x402 签名 |
+| BlockRun sidecar 图像 | http://127.0.0.1:4001/v1/images/generations | 图像生成（0.3.6 起） |
+| BlockRun sidecar 模型列表 | http://127.0.0.1:4001/v1/models | chat 模型目录 |
 | LiteLLM Proxy 健康 | http://127.0.0.1:4000/health/liveliness | `{"status":"healthy"}` |
 | LiteLLM Proxy API | http://127.0.0.1:4000/v1 | 你的应用调这里 |
 | LiteLLM Proxy UI | http://127.0.0.1:4000/ui/ | 管理面板 |
