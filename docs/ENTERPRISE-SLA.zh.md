@@ -8,7 +8,7 @@
 > 2. **部署 / 扩容** — 升级或扩容需要多久？会中断服务吗？
 > 3. **SLA** — 故障响应、可用性、值守覆盖是什么标准？
 
-联系：`vicky@blockrun.ai`、Telegram `@bc1max`
+联系：`care@blockrun.ai`、Telegram `@bc1max`
 
 ---
 
@@ -64,10 +64,9 @@
 
 ### 需要保证 QPS / TPM？
 
-走 enterprise 路径：
-- **专属容量**（独占 OpenAI / Anthropic / Google 等 provider 容量，保证不被其他流量影响）
-- **预留 provider TPM / RPM**（向 provider 加预付保留容量，写入合约）
-- **自定义 429 行为**（白名单 IP 永不被限）
+如有定制化容量或限流需求，欢迎直接联系我们沟通，按实际场景讨论方案。
+
+**联系：** `care@blockrun.ai` · Telegram `@bc1max`
 
 ---
 
@@ -158,7 +157,7 @@ Cloud Run 按 in-flight 并发请求数扩容：
 | **平台可用性** | ~99.9%（过去 90 天 Cloud Run SLO 实测） | **99.9% 合约级 SLA**，含按比例 credit 退款条款 |
 | **故障首次响应** | 工作时段（亚洲 + 美国 09:00–22:00 PT）<2 小时 | **4 小时合约级首响**（任何时段） |
 | **故障处理 / 恢复** | P0 全平台不可用 <2 小时；P1 单 provider / 单 endpoint <24 小时；P2 非阻塞 <5 工作日 | **签订时按等级条款固化** |
-| **支持渠道** | Telegram `@bc1max`（主要） + email `vicky@blockrun.ai` | 专属 Slack 频道 + on-call 工程师 pager + 季度 review |
+| **支持渠道** | Telegram `@bc1max`（主要） + email `care@blockrun.ai` | 专属 Slack 频道 + on-call 工程师 pager + 季度 review |
 | **7×24 值守** | 覆盖亚洲 + 美国工作时段 | 7×24 on-call rotation（仅 enterprise 合约） |
 
 ### 故障等级定义
@@ -189,7 +188,7 @@ Enterprise 合约下开放：
 
 按月度 commit 报价，单独安排电话聊需求。
 
-**联系：** `vicky@blockrun.ai` · Telegram `@bc1max`
+**联系：** `care@blockrun.ai` · Telegram `@bc1max`
 
 ---
 
