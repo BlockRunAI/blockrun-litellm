@@ -14,7 +14,7 @@
 
 ## 1. 限流标准（QPS / RPM / TPM / TPH）
 
-**BlockRun 平台层不设 QPS / RPM / TPM / TPH 配额。** 我们是 pay-per-call 模型，付费即用，没有按月调用配额。有效限流来自**上游 provider 的共享 key pool**，按 **provider 区分**（不按 model 区分）。
+**BlockRun 平台层不设 QPS / RPM / TPM / TPH 配额。** 我们是 pay-per-call 模型，付费即用，没有按月调用配额。有效限流来自**上游 provider 的—**，按 **provider 区分**（不按 model 区分）。
 
 ### 各 provider 的参考限流
 
@@ -22,17 +22,17 @@
 
 | Provider | 典型 RPM / model | 典型 TPM / model | 备注 |
 |---|---|---|---|
-| OpenAI (tier 5) | ~10,000 | ~2M | 共享 key pool，所有付费流量都竞争这块预算 |
-| Anthropic | ~4,000 | ~400K | 共享 key pool |
-| Google Gemini | ~1,000 | ~4M | 共享 key pool |
-| DeepSeek | ~10,000+ | 宽松 | 共享 key pool |
-| xAI (Grok) | ~3,000 | ~1M | 共享 key pool |
+| OpenAI (tier 5) | ~10,000 | ~2M | — |
+| Anthropic | ~4,000 | ~400K | — |
+| Google Gemini | ~1,000 | ~4M | — |
+| DeepSeek | ~10,000+ | 宽松 | — |
+| xAI (Grok) | ~3,000 | ~1M | — |
 | Moonshot / MiniMax / ZAI | 各家差异 | 各家差异 | 当前流量远低于上限 |
 | NVIDIA（免费 model） | ~60 RPM per IP | — | NVIDIA 侧按源 IP 限流，高并发建议改用付费 model |
-| Google（图像：nano-banana / nano-banana-pro） | ~60 RPM | 不适用 | 共享 key pool；生图耗时 3–8 秒，实际并发受单次生成时长限制 |
-| OpenAI（图像：dall-e-3 / gpt-image-1/2） | ~50 RPM | 不适用 | 共享 key pool |
-| xAI（图像：grok-imagine） | ~60 RPM | 不适用 | 共享 key pool |
-| ZAI（图像：cogview-4） | 按 provider | 不适用 | 共享 key pool |
+| Google（图像：nano-banana / nano-banana-pro） | ~60 RPM | 不适用 | 生图耗时 3–8 秒，实际并发受单次生成时长限制 |
+| OpenAI（图像：dall-e-3 / gpt-image-1/2） | ~50 RPM | 不适用 | — |
+| xAI（图像：grok-imagine） | ~60 RPM | 不适用 | — |
+| ZAI（图像：cogview-4） | 按 provider | 不适用 | — |
 | token360（视频） | 按 model 不同 | 按 model 不同 | Seedance 异步生成，限流通常表现为排队等待而非 429 |
 | Suno（音乐） | 按 provider | 不适用 | 按任务配额 |
 | Bland.ai（语音） | 按 provider | 不适用 | 按账户并发上限 |
