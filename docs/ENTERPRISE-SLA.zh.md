@@ -179,14 +179,7 @@ Enterprise 合约下开放：
 
 ### Enterprise 升级路径
 
-如贵团队的生产部署需要：
-- 99.9% 合约级 SLA + 退款条款
-- 7×24 on-call
-- 专属容量 / 保留 provider TPM
-- 专属 Slack channel + 季度 review
-- VPC peering / 自托管选项
-
-按月度 commit 报价，单独安排电话聊需求。
+如需了解 enterprise 方案，欢迎联系我们沟通具体需求。
 
 **联系：** `care@blockrun.ai` · Telegram `@bc1max`
 
