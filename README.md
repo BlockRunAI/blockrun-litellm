@@ -265,7 +265,6 @@ curl http://localhost:4001/v1/chat/completions \
 ### 2e. Image generation
 
 ```python
-import base64, re
 from openai import OpenAI
 
 client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
@@ -274,17 +273,10 @@ resp = client.images.generate(
     prompt="a corgi astronaut on the moon",
     size="1024x1024",
 )
-url = resp.data[0].url
-if url.startswith("data:"):
-    # nano-banana returns base64 — decode and save
-    b64 = re.sub(r"^data:image/\w+;base64,", "", url)
-    with open("output.png", "wb") as f:
-        f.write(base64.b64decode(b64))
-else:
-    print(url)  # models like dall-e-3, gpt-image-2 return HTTPS URLs
+print(resp.data[0].url)  # always an HTTPS proxy URL
 ```
 
-> **Note:** `google/nano-banana` and `google/nano-banana-pro` return base64 data URIs (`data:image/png;base64,...`). All other image models return HTTPS URLs.
+All image models return HTTPS proxy URLs — the BlockRun server handles any provider-level differences (e.g. base64 payloads) transparently before responding.
 
 Available image models: `google/nano-banana`, `google/nano-banana-pro`, `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2`, `xai/grok-imagine-image`, `xai/grok-imagine-image-pro`, `zai/cogview-4`.
 
