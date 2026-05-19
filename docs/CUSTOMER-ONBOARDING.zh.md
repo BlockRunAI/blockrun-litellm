@@ -422,7 +422,19 @@ litellm.completion(
 
 Sidecar proxy 现在暴露 `POST /v1/images/generations`（OpenAI 协议兼容）。
 
+### 各模型返回格式
+
+| 模型 | `data[0].url` 内容 |
+|---|---|
+| `google/nano-banana`、`google/nano-banana-pro` | **base64 data URI**（`data:image/png;base64,...`）—— Google Imagen 返回原始字节 |
+| `openai/dall-e-3`、`openai/gpt-image-1`、`openai/gpt-image-2` | HTTPS URL |
+| `xai/grok-imagine-image`、`xai/grok-imagine-image-pro` | HTTPS URL |
+| `zai/cogview-4` | HTTPS URL |
+
+### 使用示例
+
 ```python
+import base64, re
 from openai import OpenAI
 
 client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
@@ -431,29 +443,30 @@ resp = client.images.generate(
     prompt="一只穿着宇航服的柯基",
     size="1024x1024",
 )
-print(resp.data[0].url)
+
+url = resp.data[0].url
+if url.startswith("data:"):
+    # nano-banana 返回 base64，解码后保存
+    b64 = re.sub(r"^data:image/\w+;base64,", "", url)
+    with open("output.png", "wb") as f:
+        f.write(base64.b64decode(b64))
+    print("已保存到 output.png")
+else:
+    print(url)
 ```
 
-```bash
-curl http://localhost:4001/v1/images/generations \
-  -H "Content-Type: application/json" \
-  -d '{"model": "google/nano-banana", "prompt": "一只穿着宇航服的柯基", "size": "1024x1024"}'
+返回 URL 的模型（`dall-e-3`、`gpt-image-2` 等）直接使用：
+
+```python
+resp = client.images.generate(
+    model="openai/gpt-image-2",
+    prompt="一只穿着宇航服的柯基",
+    size="1024x1024",
+)
+print(resp.data[0].url)  # 直接 HTTPS 链接
 ```
 
 可用图像模型：`google/nano-banana`、`google/nano-banana-pro`、`openai/dall-e-3`、`openai/gpt-image-1`、`openai/gpt-image-2`、`xai/grok-imagine-image`、`xai/grok-imagine-image-pro`、`zai/cogview-4`。
-
-LiteLLM `image_generation()` 同样支持，指向 sidecar 即可：
-
-```python
-import litellm
-resp = litellm.image_generation(
-    model="openai/google/nano-banana",
-    prompt="一只穿着宇航服的柯基",
-    api_base="http://localhost:4001/v1",
-    api_key="dummy",
-)
-print(resp.data[0].url)
-```
 
 ---
 

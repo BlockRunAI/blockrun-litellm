@@ -368,7 +368,19 @@ litellm.completion(
 
 The sidecar proxy now exposes `POST /v1/images/generations` (OpenAI-compatible).
 
+### Response format by model
+
+| Model | `data[0].url` contains |
+|---|---|
+| `google/nano-banana`, `google/nano-banana-pro` | **base64 data URI** (`data:image/png;base64,...`) — Google Imagen returns raw bytes |
+| `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2` | HTTPS URL |
+| `xai/grok-imagine-image`, `xai/grok-imagine-image-pro` | HTTPS URL |
+| `zai/cogview-4` | HTTPS URL |
+
+### Usage
+
 ```python
+import base64, re
 from openai import OpenAI
 
 client = OpenAI(api_key="dummy", base_url="http://localhost:4001/v1")
@@ -377,29 +389,30 @@ resp = client.images.generate(
     prompt="a corgi astronaut on the moon",
     size="1024x1024",
 )
-print(resp.data[0].url)
+
+url = resp.data[0].url
+if url.startswith("data:"):
+    # nano-banana returns base64 — decode and save
+    b64 = re.sub(r"^data:image/\w+;base64,", "", url)
+    with open("output.png", "wb") as f:
+        f.write(base64.b64decode(b64))
+    print("Saved to output.png")
+else:
+    print(url)
 ```
 
-```bash
-curl http://localhost:4001/v1/images/generations \
-  -H "Content-Type: application/json" \
-  -d '{"model": "google/nano-banana", "prompt": "a corgi astronaut", "size": "1024x1024"}'
+For models that return URLs (`dall-e-3`, `gpt-image-2`, etc.):
+
+```python
+resp = client.images.generate(
+    model="openai/gpt-image-2",
+    prompt="a corgi astronaut on the moon",
+    size="1024x1024",
+)
+print(resp.data[0].url)  # direct HTTPS link
 ```
 
 Available image models: `google/nano-banana`, `google/nano-banana-pro`, `openai/dall-e-3`, `openai/gpt-image-1`, `openai/gpt-image-2`, `xai/grok-imagine-image`, `xai/grok-imagine-image-pro`, `zai/cogview-4`.
-
-LiteLLM `image_generation()` also works — point it at the sidecar:
-
-```python
-import litellm
-resp = litellm.image_generation(
-    model="openai/google/nano-banana",
-    prompt="a corgi astronaut",
-    api_base="http://localhost:4001/v1",
-    api_key="dummy",
-)
-print(resp.data[0].url)
-```
 
 ---
 
