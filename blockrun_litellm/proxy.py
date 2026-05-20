@@ -53,10 +53,13 @@ from blockrun_litellm import _adapter
 log = logging.getLogger("blockrun_litellm.proxy")
 
 # Limit concurrent in-flight requests to avoid saturating upstream rate limits.
-# Anthropic (claude-opus-*) has strict TPM/RPM caps — 100 simultaneous requests
-# all with 8 K default max_tokens will immediately exceed them and cause 500s.
-# Override with env var BLOCKRUN_MAX_CONCURRENT (int, default 20).
-_MAX_CONCURRENT: int = int(os.environ.get("BLOCKRUN_MAX_CONCURRENT", "20"))
+# Anthropic (claude-opus-*) has strict TPM/RPM caps — raising this too high
+# without also raising upstream quota will cause 429s.
+# Override with env var BLOCKRUN_MAX_CONCURRENT (int, default 100).
+# The httpx pool is configured for 200 connections; each paid request uses 2
+# connections (402 probe + authenticated call), so 100 is the practical ceiling
+# before the pool itself becomes the bottleneck.
+_MAX_CONCURRENT: int = int(os.environ.get("BLOCKRUN_MAX_CONCURRENT", "100"))
 _concurrency_sem: asyncio.Semaphore  # initialised in lifespan / lazily on first use
 
 
@@ -156,20 +159,55 @@ async def _sse_event_stream(
     iterator drains. Errors during streaming are surfaced as a final
     ``data: {"error": ...}`` event before the [DONE], since headers
     have already been flushed.
+
+    Concurrency note: the semaphore is held only until the first chunk
+    arrives from upstream — covering the x402 probe + sign + HTTP handshake.
+    The remaining chunks stream freely without occupying a semaphore slot,
+    so a slow client reading at 1 token/s does not block 100 other callers.
     """
+    stream_gen = _adapter.chat_completion_stream_async(
+        model=model, messages=messages, **openai_kwargs
+    )
+
+    # Phase 1: acquire semaphore, establish upstream connection, get first chunk.
+    first_chunk_data: Optional[str] = None
+    error_event: Optional[str] = None
+
     async with _get_semaphore():
         try:
-            async for chunk in _adapter.chat_completion_stream_async(
-                model=model, messages=messages, **openai_kwargs
-            ):
-                yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
+            first_obj = await stream_gen.__anext__()
+            first_chunk_data = f"data: {_json.dumps(first_obj.model_dump(exclude_none=True))}\n\n"
+        except StopAsyncIteration:
+            pass  # empty stream — unusual but not fatal
         except PaymentError as exc:
-            yield _openai_error_event(str(exc), code=402)
+            error_event = _openai_error_event(str(exc), code=402)
         except APIError as exc:
-            yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.exception("stream error")
-            yield _openai_error_event(str(exc), code=500)
+            error_event = _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
+        except Exception as exc:
+            log.exception("stream error (first chunk)")
+            error_event = _openai_error_event(str(exc), code=500)
+
+    # Semaphore released — emit first chunk or error, then stream the rest.
+    if error_event:
+        yield error_event
+        yield "data: [DONE]\n\n"
+        return
+
+    if first_chunk_data:
+        yield first_chunk_data
+
+    # Phase 2: drain remaining chunks without holding the semaphore.
+    try:
+        async for chunk in stream_gen:
+            yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
+    except PaymentError as exc:
+        yield _openai_error_event(str(exc), code=402)
+    except APIError as exc:
+        yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
+    except Exception as exc:
+        log.exception("stream error")
+        yield _openai_error_event(str(exc), code=500)
+
     yield "data: [DONE]\n\n"
 
 

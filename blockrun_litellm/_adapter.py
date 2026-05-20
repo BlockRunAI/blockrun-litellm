@@ -24,6 +24,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import threading
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
@@ -72,6 +73,13 @@ _sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}
 _image_clients: Dict[str, ImageClient] = {}
 _lock = threading.Lock()
+
+# Bounded thread pool for image generation (ImageClient is sync-only).
+# Capped at 20 so that high-concurrency image requests don't spawn unlimited
+# threads and exhaust memory. Matches the default BLOCKRUN_MAX_CONCURRENT.
+_image_executor: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(max_workers=20)
+)
 
 
 def _wallet_env_var(api_url: Optional[str]) -> str:
@@ -331,7 +339,7 @@ async def image_generation_async(
     client = get_image_client(api_url=api_url, private_key=private_key)
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
-        None, lambda: client.generate(prompt, model=model, size=size, n=n)
+        _image_executor, lambda: client.generate(prompt, model=model, size=size, n=n)
     )
     return response.model_dump(exclude_none=True)
 

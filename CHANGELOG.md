@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.7 — 2026-05-19
+
+### Changed
+
+- **Default `BLOCKRUN_MAX_CONCURRENT` raised from 20 → 100.**
+  The previous default was a conservative development-time value. The httpx
+  pool is configured for 200 connections; each paid request uses 2 connections
+  (402 probe + authenticated call), so 100 concurrent requests is the natural
+  ceiling before the pool itself becomes the bottleneck.
+
+- **Streaming semaphore released after first chunk (early release).**
+  Previously the semaphore was held for the entire stream duration, meaning a
+  slow client reading at 1 token/s occupied a concurrency slot for the full
+  generation time (potentially 30–60 s). Now the semaphore is released as soon
+  as the first chunk arrives from upstream — covering only the x402 probe +
+  sign + HTTP handshake. Remaining chunks stream freely without holding a slot.
+  In practice this means 100 concurrent streams can proceed simultaneously even
+  with very slow clients; the upstream provider's RPM/TPM is the actual limit.
+
+- **Image generation uses a bounded thread pool (max 20 workers).**
+  Previously `image_generation_async` used `loop.run_in_executor(None, ...)`,
+  which dispatches to Python's default unbounded thread pool. Under heavy image
+  load this could spawn hundreds of threads. Now uses a module-level
+  `ThreadPoolExecutor(max_workers=20)` that caps image concurrency and prevents
+  memory exhaustion.
+
 ## 0.3.6 — 2026-05-18
 
 ### Added

@@ -174,8 +174,26 @@ Environment variables (no CLI flag):
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BLOCKRUN_MAX_CONCURRENT` | `20` | Max in-flight requests. Excess requests queue inside the sidecar. Raise to `50`+ only if you have Anthropic Tier 4+ limits; paid models (Claude Opus, Gemini Pro) fail fast above their upstream RPM. |
+| `BLOCKRUN_MAX_CONCURRENT` | `100` | Max in-flight requests. Excess requests queue inside the sidecar. See table below for tuning guidance. |
 | `BLOCKRUN_PROXY_TOKEN` | *(unset)* | Optional Bearer token guard on all sidecar endpoints. |
+
+#### High-concurrency tuning
+
+Streaming requests release their semaphore slot as soon as the first token arrives from upstream (the x402 probe + sign is the only serialised part). For non-streaming requests the slot is held until the full response returns.
+
+| Deployment | `BLOCKRUN_MAX_CONCURRENT` | `uvicorn --workers` | Effective max concurrency |
+|---|---|---|---|
+| Dev / single user | 20 | 1 | 20 |
+| Small team (10–20 concurrent) | 50 | 1 | 50 |
+| Production (100 concurrent) | 100 *(default)* | 1 | 100 |
+| High-load (500+ concurrent) | 200 | 4 | 800 |
+
+Multi-worker launch example:
+```bash
+BLOCKRUN_MAX_CONCURRENT=200 uvicorn blockrun_litellm.proxy:app --workers 4 --host 0.0.0.0 --port 4001
+```
+
+> **Note:** Each worker has its own semaphore. With `--workers 4` and `BLOCKRUN_MAX_CONCURRENT=200`, up to 800 requests can be in-flight simultaneously. The real ceiling is the upstream provider's RPM/TPM — see the [Enterprise SLA guide](docs/ENTERPRISE-SLA.zh.md) for per-provider limits.
 
 Optional shared-secret guard:
 
@@ -362,7 +380,7 @@ litellm_settings:
 | `~/.blockrun/cost_log.jsonl` | USDC cost audit for paid calls (SDK) | — |
 | `~/.blockrun/data/*.json` | Full request/response archive for paid calls (SDK) | — |
 | `BLOCKRUN_PROXY_TOKEN` (env) | Optional shared-secret guard on sidecar | yes |
-| `BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests to upstream (default `20`) | yes |
+| `BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests to upstream (default `100`) | yes |
 
 ---
 

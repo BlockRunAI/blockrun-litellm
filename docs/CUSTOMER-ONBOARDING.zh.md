@@ -367,7 +367,25 @@ print(by_model.most_common())
 | `~/.blockrun/cost_log.jsonl` | 付费 USDC 成本审计（SDK 写） | 不可改 |
 | `~/.blockrun/data/*.json` | 付费调用的完整请求/响应归档（SDK 写） | 不可改 |
 | `BLOCKRUN_PROXY_TOKEN`（env） | sidecar 可选的共享密钥 | 是 |
-| `BLOCKRUN_MAX_CONCURRENT`（env） | sidecar 向上游最大并发请求数（默认 `20`）。超出的请求在 sidecar 内排队；仅 Anthropic Tier 4+ 账号建议调到 `50` 以上。 | 是 |
+| `BLOCKRUN_MAX_CONCURRENT`（env） | sidecar 向上游最大并发请求数（默认 `100`）。超出的请求在 sidecar 内排队。见下方调优表。 | 是 |
+
+### 高并发调优
+
+Streaming 请求在第一个 token 到达后立即释放并发 slot（只有 x402 probe + 签名阶段是串行的）。非 streaming 请求持有 slot 直到完整响应返回。
+
+| 部署场景 | `BLOCKRUN_MAX_CONCURRENT` | `uvicorn --workers` | 实际最大并发 |
+|---|---|---|---|
+| 开发 / 单用户 | 20 | 1 | 20 |
+| 小团队 | 50 | 1 | 50 |
+| 生产 | 100（默认） | 1 | 100 |
+| 高负载 | 200 | 4 | 800 |
+
+```bash
+# 高负载启动示例
+BLOCKRUN_MAX_CONCURRENT=200 uvicorn blockrun_litellm.proxy:app --workers 4 --host 0.0.0.0 --port 4001
+```
+
+实际上限由上游 provider 的 RPM/TPM 决定，详见 [ENTERPRISE-SLA.zh.md](./ENTERPRISE-SLA.zh.md)。
 
 ---
 

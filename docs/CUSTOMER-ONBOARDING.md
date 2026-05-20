@@ -313,7 +313,25 @@ litellm_settings:
 | `~/.blockrun/cost_log.jsonl` | Per-paid-call USDC cost audit (`blockrun-llm` SDK) | not configurable |
 | `~/.blockrun/data/*.json` | Full request/response archive for paid calls | not configurable |
 | `$BLOCKRUN_PROXY_TOKEN` (env) | Optional shared-secret guard on the sidecar | yes |
-| `$BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests the sidecar sends upstream (default `20`). Excess requests queue; raise to `50`+ only for Anthropic Tier 4+ accounts. | yes |
+| `$BLOCKRUN_MAX_CONCURRENT` (env) | Max in-flight requests the sidecar sends upstream (default `100`). Excess requests queue. See tuning table below. | yes |
+
+### High-concurrency tuning
+
+Streaming requests release their concurrency slot after the first token arrives (the x402 probe + sign is the only serialised part). Non-streaming requests hold the slot until the full response returns.
+
+| Deployment | `BLOCKRUN_MAX_CONCURRENT` | `uvicorn --workers` | Effective concurrency |
+|---|---|---|---|
+| Dev / single user | 20 | 1 | 20 |
+| Small team | 50 | 1 | 50 |
+| Production | 100 *(default)* | 1 | 100 |
+| High-load | 200 | 4 | 800 |
+
+```bash
+# High-load example
+BLOCKRUN_MAX_CONCURRENT=200 uvicorn blockrun_litellm.proxy:app --workers 4 --host 0.0.0.0 --port 4001
+```
+
+The real ceiling is the upstream provider's RPM/TPM — see [ENTERPRISE-SLA.zh.md](./ENTERPRISE-SLA.zh.md) for per-provider limits.
 
 ---
 
