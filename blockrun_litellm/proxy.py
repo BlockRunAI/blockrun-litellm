@@ -50,6 +50,15 @@ from blockrun_llm.types import APIError, PaymentError
 
 from blockrun_litellm import _adapter
 
+# Optional — present when blockrun-llm[solana] is installed alongside solana-py.
+# SolanaRpcException wraps httpx / network errors from the Solana JSON-RPC layer
+# (e.g. getAccountInfo failure during x402 payment signing). We handle it
+# explicitly so it doesn't produce a noisy full-traceback in the log.
+try:
+    from solana.exceptions import SolanaRpcException as _SolanaRpcException  # type: ignore[import-untyped]
+except ImportError:
+    _SolanaRpcException = None  # type: ignore[assignment,misc]
+
 log = logging.getLogger("blockrun_litellm.proxy")
 
 # Limit concurrent in-flight requests to avoid saturating upstream rate limits.
@@ -126,6 +135,15 @@ async def list_models() -> Dict[str, Any]:
     }
 
 
+def _is_solana_rpc_exc(exc: Exception) -> bool:
+    """Return True when ``exc`` is a ``SolanaRpcException`` (optional dep)."""
+    return _SolanaRpcException is not None and isinstance(exc, _SolanaRpcException)
+
+
+def _solana_rpc_msg(exc: Exception) -> str:
+    return str(getattr(exc, "error_msg", exc))
+
+
 def _openai_error_event(message: str, code: int = 500) -> str:
     """Render an error as an SSE ``data:`` line in OpenAI's error schema.
 
@@ -184,8 +202,12 @@ async def _sse_event_stream(
         except APIError as exc:
             error_event = _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
         except Exception as exc:
-            log.exception("stream error (first chunk)")
-            error_event = _openai_error_event(str(exc), code=500)
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
+                error_event = _openai_error_event(_solana_rpc_msg(exc), code=503)
+            else:
+                log.exception("stream error (first chunk)")
+                error_event = _openai_error_event(str(exc), code=500)
 
     # Semaphore released — emit first chunk or error, then stream the rest.
     if error_event:
@@ -205,8 +227,12 @@ async def _sse_event_stream(
     except APIError as exc:
         yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
     except Exception as exc:
-        log.exception("stream error")
-        yield _openai_error_event(str(exc), code=500)
+        if _is_solana_rpc_exc(exc):
+            log.warning("solana rpc error during stream: %s", _solana_rpc_msg(exc))
+            yield _openai_error_event(_solana_rpc_msg(exc), code=503)
+        else:
+            log.exception("stream error")
+            yield _openai_error_event(str(exc), code=500)
 
     yield "data: [DONE]\n\n"
 
@@ -254,6 +280,11 @@ async def chat_completions(request: Request) -> Any:
         except APIError as exc:
             status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
             return JSONResponse(status_code=status, content={"error": str(exc)})
+        except Exception as exc:
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error: %s", _solana_rpc_msg(exc))
+                raise HTTPException(503, _solana_rpc_msg(exc))
+            raise
 
     return payload
 
