@@ -113,3 +113,90 @@ def test_solana_extras_missing_raises_import_error(monkeypatch):
 
     with pytest.raises(ImportError, match=r"\[solana\]"):
         _adapter.get_sync_client(api_url="https://sol.blockrun.ai/api")
+
+
+# ---------------------------------------------------------------------------
+# Image generation — Solana branch (added 0.3.8 to fix the
+# ``transaction_simulation_failed`` regression for gpt-image-2 et al.)
+# ---------------------------------------------------------------------------
+
+
+def test_image_client_routes_to_solana(monkeypatch):
+    """A Solana ``api_url`` should make ``get_image_client`` return a
+    ``SolanaLLMClient`` instead of the EVM-only ``ImageClient``."""
+    instances: list[Any] = []
+
+    class FakeSolanaClient:
+        def __init__(self, *, private_key=None, api_url=None):
+            instances.append({"private_key": private_key, "api_url": api_url})
+
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    client = _adapter.get_image_client(
+        api_url="https://sol.blockrun.ai/api",
+        private_key="bogus-solana-key",
+    )
+    assert isinstance(client, FakeSolanaClient)
+    assert instances == [
+        {"private_key": "bogus-solana-key", "api_url": "https://sol.blockrun.ai/api"}
+    ]
+
+
+def test_image_client_base_still_uses_imageclient(monkeypatch):
+    """Default / Base ``api_url`` keeps using the EVM ``ImageClient``."""
+    from blockrun_llm import ImageClient
+
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    client = _adapter.get_image_client(api_url="https://blockrun.ai/api")
+    assert isinstance(client, ImageClient)
+
+
+def test_image_client_solana_missing_extras_raises(monkeypatch):
+    """Solana ``api_url`` without [solana] extras → clear ImportError."""
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", False)
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", None)
+
+    with pytest.raises(ImportError, match=r"\[solana\]"):
+        _adapter.get_image_client(api_url="https://sol.blockrun.ai/api")
+
+
+def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
+    """``image_generation_sync`` on Solana should call ``.image(...)`` on
+    ``SolanaLLMClient`` (not ``.generate(...)`` which only exists on the
+    EVM ``ImageClient``)."""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/img.png"}]}
+
+    class FakeSolanaClient:
+        def __init__(self, *, private_key=None, api_url=None):
+            pass
+
+        def image(self, prompt, *, model=None, size=None, n=1):
+            captured.update(prompt=prompt, model=model, size=size, n=n)
+            return FakeResponse()
+
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    out = _adapter.image_generation_sync(
+        "a red apple",
+        model="openai/gpt-image-2",
+        size="1024x1024",
+        n=1,
+        api_url="https://sol.blockrun.ai/api",
+        private_key="bogus",
+    )
+    assert out == {"data": [{"url": "https://example/img.png"}]}
+    assert captured == {
+        "prompt": "a red apple",
+        "model": "openai/gpt-image-2",
+        "size": "1024x1024",
+        "n": 1,
+    }

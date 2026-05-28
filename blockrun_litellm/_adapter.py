@@ -71,7 +71,7 @@ def _is_solana_url(api_url: Optional[str]) -> bool:
 
 _sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}
-_image_clients: Dict[str, ImageClient] = {}
+_image_clients: Dict[str, Any] = {}  # ImageClient (Base) or SolanaLLMClient (Solana)
 _lock = threading.Lock()
 
 # Bounded thread pool for image generation (ImageClient is sync-only).
@@ -303,14 +303,53 @@ async def chat_completion_stream_async(
 def get_image_client(
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
-) -> ImageClient:
+) -> Union[ImageClient, "SolanaLLMClient"]:  # type: ignore[name-defined]
+    """Return a cached image client for the given creds/url.
+
+    Routes to :class:`SolanaLLMClient` when ``api_url`` points at
+    ``sol.blockrun.ai``, otherwise :class:`ImageClient` (Base).
+
+    The Solana branch is required because ``ImageClient`` only signs EIP-712
+    over the EVM ``Account`` — sending those payments to the Solana gateway
+    fails at x402 settlement (``transaction_simulation_failed``).
+    ``SolanaLLMClient`` exposes ``.image()`` / ``.image_edit()`` that hit the
+    same ``/v1/images/*`` endpoints with SVM-scheme x402 payments.
+    """
     key = _client_key(api_url, private_key)
     with _lock:
         client = _image_clients.get(key)
         if client is None:
-            client = ImageClient(private_key=private_key, api_url=api_url)
+            if _is_solana_url(api_url):
+                if not _HAS_SOLANA or SolanaLLMClient is None:
+                    raise ImportError(
+                        "Solana support requires the solana extra. "
+                        "Install with: pip install 'blockrun-litellm[solana]'"
+                    )
+                client = SolanaLLMClient(
+                    private_key=private_key,
+                    api_url=api_url or SOLANA_API_URL,
+                )
+            else:
+                client = ImageClient(private_key=private_key, api_url=api_url)
             _image_clients[key] = client
         return client
+
+
+def _invoke_image_generate(client: Any, prompt: str, *, model, size, n):
+    """Dispatch ``generate`` (Base ImageClient) vs ``image`` (SolanaLLMClient).
+
+    ``ImageClient.generate`` and ``SolanaLLMClient.image`` are intentionally
+    named differently in the SDK but accept the same call shape.
+    """
+    if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
+        # SolanaLLMClient.image requires non-None model/size (no class-level defaults).
+        kwargs: Dict[str, Any] = {"n": n}
+        if model is not None:
+            kwargs["model"] = model
+        if size is not None:
+            kwargs["size"] = size
+        return client.image(prompt, **kwargs)
+    return client.generate(prompt, model=model, size=size, n=n)
 
 
 def image_generation_sync(
@@ -323,7 +362,7 @@ def image_generation_sync(
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     client = get_image_client(api_url=api_url, private_key=private_key)
-    response = client.generate(prompt, model=model, size=size, n=n)
+    response = _invoke_image_generate(client, prompt, model=model, size=size, n=n)
     return response.model_dump(exclude_none=True)
 
 
@@ -339,7 +378,8 @@ async def image_generation_async(
     client = get_image_client(api_url=api_url, private_key=private_key)
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
-        _image_executor, lambda: client.generate(prompt, model=model, size=size, n=n)
+        _image_executor,
+        lambda: _invoke_image_generate(client, prompt, model=model, size=size, n=n),
     )
     return response.model_dump(exclude_none=True)
 
