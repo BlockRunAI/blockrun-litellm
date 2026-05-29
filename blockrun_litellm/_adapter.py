@@ -81,6 +81,17 @@ _image_executor: concurrent.futures.ThreadPoolExecutor = (
     concurrent.futures.ThreadPoolExecutor(max_workers=20)
 )
 
+# Per-call timeout for the image SolanaLLMClient. The SDK default
+# (``blockrun_llm.solana_client.DEFAULT_TIMEOUT`` = 60s) is too short for
+# slow models such as ``openai/gpt-image-2`` (90-180s end-to-end on the
+# synchronous Solana gateway path) — under the default, the sidecar throws
+# ``httpx.ReadTimeout`` before the gateway can return the generated image,
+# even though the gateway has already accepted payment and is producing the
+# result. Overridable via env var ``BLOCKRUN_SOLANA_IMAGE_TIMEOUT`` for ops
+# tuning without redeploy. See https://github.com/BlockRunAI/blockrun-llm
+# for the matching upstream change.
+_SOLANA_IMAGE_TIMEOUT_S = float(os.environ.get("BLOCKRUN_SOLANA_IMAGE_TIMEOUT", "300"))
+
 
 def _wallet_env_var(api_url: Optional[str]) -> str:
     """Which env var to consult for the default wallet on this chain."""
@@ -328,6 +339,7 @@ def get_image_client(
                 client = SolanaLLMClient(
                     private_key=private_key,
                     api_url=api_url or SOLANA_API_URL,
+                    timeout=_SOLANA_IMAGE_TIMEOUT_S,
                 )
             else:
                 client = ImageClient(private_key=private_key, api_url=api_url)
