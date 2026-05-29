@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.8 — 2026-05-27
+
+### Fixed
+- **Solana image generation now uses `SolanaLLMClient`.** `get_image_client()`
+  previously returned the EVM-only `ImageClient` regardless of `api_url`, so
+  Solana image requests signed EIP-712 payments and crashed at x402 settlement
+  with `transaction_simulation_failed`. Branches on `_is_solana_url(api_url)`
+  the same way `get_sync_client()` / `get_async_client()` already did.
+- New `_invoke_image_generate()` dispatcher calls `SolanaLLMClient.image()`
+  on Solana and `ImageClient.generate()` on Base from both sync and async
+  paths.
+
+### Changed
+- `blockrun-llm` floor raised to `>=0.31.1` (sync + solana extras) for the
+  new `SolanaLLMClient.image()` method.
+
+## 0.3.9 — 2026-05-28
+
+### Fixed
+- **Sidecar now surfaces the gateway's real 402 reason.** Previously a
+  `PaymentError` from the SDK was returned as a flat
+  `{"detail": "Payment rejected. Check your Solana USDC balance."}`,
+  even when the real failure was an x402 facilitator settlement error
+  (`transaction_simulation_failed`, `insufficient_funds`,
+  `payment_expired`, etc.). With `blockrun-llm >= 0.32.0` the SDK
+  preserves the gateway body in `PaymentError.response`, and the proxy
+  now returns it as `{"error": "...", "details": "..."}` on both the
+  `/v1/chat/completions` and `/v1/images/generations` routes, plus
+  folds it into the streaming error event so SSE clients see it too.
+- **Slow image models (`openai/gpt-image-2`, `openai/dall-e-3`,
+  `google/nano-banana-pro` at 4K) now complete via the SDK's new
+  202 + poll loop instead of crashing with a Pydantic ValidationError
+  on the job stub.** No proxy code changed for this — bumping the
+  `blockrun-llm` floor to `>=0.32.0` is enough.
+
+### Changed
+- **`blockrun-llm` floor raised to `>=0.32.0`** (for both the runtime
+  install and the `[solana]` extra) so the PaymentError surfacing and
+  image-poll fix are guaranteed to be present.
+
 ## 0.3.7 — 2026-05-19
 
 ### Changed

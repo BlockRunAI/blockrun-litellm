@@ -144,6 +144,38 @@ def _solana_rpc_msg(exc: Exception) -> str:
     return str(getattr(exc, "error_msg", exc))
 
 
+def _payment_error_payload(exc: PaymentError) -> Dict[str, Any]:
+    """Render a :class:`PaymentError` into the JSON body for an HTTP 402.
+
+    When the SDK preserves the gateway's original failure reason
+    (``status_code`` + ``response.details``), surface it verbatim so
+    customers see the real facilitator error (e.g.
+    ``transaction_simulation_failed``) instead of just our SDK's
+    generic message. Falls back to ``{"error": str(exc)}`` for older
+    PaymentError instances that don't carry a response dict.
+    """
+    payload: Dict[str, Any] = {"error": str(exc)}
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        details = resp.get("details")
+        if isinstance(details, str) and details:
+            payload["details"] = details
+    return payload
+
+
+def _payment_error_sse_message(exc: PaymentError) -> str:
+    """Stream-mode equivalent of :func:`_payment_error_payload` — folds the
+    gateway ``details`` into the OpenAI-style ``message`` field so a streaming
+    client still sees the real reason in the single error event."""
+    msg = str(exc)
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        details = resp.get("details")
+        if isinstance(details, str) and details and details not in msg:
+            msg = f"{msg} (details: {details})"
+    return msg
+
+
 def _openai_error_event(message: str, code: int = 500) -> str:
     """Render an error as an SSE ``data:`` line in OpenAI's error schema.
 
@@ -198,7 +230,7 @@ async def _sse_event_stream(
         except StopAsyncIteration:
             pass  # empty stream — unusual but not fatal
         except PaymentError as exc:
-            error_event = _openai_error_event(str(exc), code=402)
+            error_event = _openai_error_event(_payment_error_sse_message(exc), code=402)
         except APIError as exc:
             error_event = _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
         except Exception as exc:
@@ -223,7 +255,7 @@ async def _sse_event_stream(
         async for chunk in stream_gen:
             yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
     except PaymentError as exc:
-        yield _openai_error_event(str(exc), code=402)
+        yield _openai_error_event(_payment_error_sse_message(exc), code=402)
     except APIError as exc:
         yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
     except Exception as exc:
@@ -276,7 +308,7 @@ async def chat_completions(request: Request) -> Any:
                 **openai_kwargs,
             )
         except PaymentError as exc:
-            raise HTTPException(402, str(exc))
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
         except APIError as exc:
             status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
             return JSONResponse(status_code=status, content={"error": str(exc)})
@@ -313,7 +345,7 @@ async def image_generations(request: Request) -> Any:
                 n=n,
             )
         except PaymentError as exc:
-            raise HTTPException(402, str(exc))
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
         except APIError as exc:
             status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
             return JSONResponse(status_code=status, content={"error": str(exc)})
