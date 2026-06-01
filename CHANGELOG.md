@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Native fingerprint passthrough is now guaranteed and tested.** The gateway
+  returns the upstream provider's response verbatim, so relay-detection signals
+  (`system_fingerprint`, `service_tier`, `usage.prompt_tokens_details` /
+  `cache_read_input_tokens` / `cache_creation_input_tokens`, per-message
+  `reasoning_content`) survive both integration modes. New
+  `tests/test_fingerprint.py` locks the contract so a future LiteLLM / SDK bump
+  can't silently strip them. New README section "Native fingerprint passthrough".
+- **Provider-mode streaming now carries the native fingerprint.** The lossy
+  `GenericStreamingChunk` previously dropped everything but text/usage; chunk
+  extras (`system_fingerprint`, `service_tier`) are now surfaced via
+  `provider_specific_fields` (new `_native_extras()` helper in `provider.py`).
+
+### Changed
+- **Model ids aligned to the current gateway flagships** across the example
+  config, README, and example scripts: `anthropic/claude-opus-4-5` →
+  `anthropic/claude-opus-4-7`, `google/gemini-3-pro` → `google/gemini-3.1-pro`.
+  `openai/gpt-5.5` unchanged.
+
 ## 0.3.8 — 2026-05-27
 
 ### Fixed
