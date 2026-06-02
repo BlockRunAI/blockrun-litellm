@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.11 — 2026-06-01
+
+### Added
+- **OpenAI Responses API bridge — `POST /v1/responses`.** The sidecar previously
+  404'd on `/v1/responses` (only Chat Completions was implemented), so LiteLLM
+  clients calling the Responses API got `NotFoundError`. It now accepts a
+  Responses request (`input` as string or item list, `instructions`,
+  `temperature`, `top_p`, `max_output_tokens`, `tools`), translates it to a chat
+  completion against the gateway, and translates the result back: a `response`
+  object (with `output[]`, `output_text`, `usage.input/output/total_tokens`) for
+  non-streaming, or the canonical `response.*` SSE event sequence
+  (`response.created` → `output_item.added` → `content_part.added` →
+  `output_text.delta*` → `*.done` → `response.completed`) when `stream=True`.
+  Text-in/text-out is fully bridged; Responses-only state (tools-as-state,
+  reasoning items, `previous_response_id`, `store`) is not round-tripped — use
+  `/v1/chat/completions` for those. New `tests/test_responses.py`.
+
 ## 0.3.10 — 2026-06-01
 
 ### Added

@@ -275,6 +275,7 @@ curl http://localhost:4001/v1/chat/completions \
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
+| `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
 | `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |

@@ -33,7 +33,9 @@ import argparse
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -351,6 +353,232 @@ async def image_generations(request: Request) -> Any:
             return JSONResponse(status_code=status, content={"error": str(exc)})
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses API bridge (/v1/responses)
+# ---------------------------------------------------------------------------
+# BlockRun's gateway only speaks Chat Completions. This endpoint accepts an
+# OpenAI Responses API request (``input`` instead of ``messages``), translates
+# it to a chat completion, and translates the result back to the Responses API
+# shape (non-stream JSON, or the typed ``response.*`` SSE event sequence when
+# ``stream=True``). Text in / text out is fully bridged; Responses-only inputs
+# (tools-as-state, reasoning items, ``previous_response_id``, ``store``) are not
+# round-tripped — use /v1/chat/completions for advanced tool/state flows.
+
+_RESPONSES_INPUT_ROLES = {"system", "user", "assistant", "tool"}
+
+
+def _responses_to_chat(body: Dict[str, Any]) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, Any], bool]:
+    """Translate a Responses API request → (model, messages, openai_kwargs, stream)."""
+    model = body.get("model")
+    messages: List[Dict[str, Any]] = []
+
+    instructions = body.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        messages.append({"role": "system", "content": instructions})
+
+    inp = body.get("input")
+    if isinstance(inp, str):
+        messages.append({"role": "user", "content": inp})
+    elif isinstance(inp, list):
+        for item in inp:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role", "user")
+            if role == "developer":
+                role = "system"
+            if role not in _RESPONSES_INPUT_ROLES:
+                role = "user"
+            content = item.get("content")
+            if isinstance(content, list):
+                # content parts: [{type: input_text|output_text|text, text: "..."}]
+                content = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and isinstance(p.get("text"), str)
+                )
+            messages.append({"role": role, "content": content if isinstance(content, str) else ""})
+
+    openai_kwargs: Dict[str, Any] = {}
+    if body.get("max_output_tokens") is not None:
+        openai_kwargs["max_tokens"] = body["max_output_tokens"]
+    for k in ("temperature", "top_p", "tools", "tool_choice"):
+        if body.get(k) is not None:
+            openai_kwargs[k] = body[k]
+
+    return model, messages, openai_kwargs, bool(body.get("stream"))
+
+
+def _chat_payload_to_response(payload: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """chat.completion dict → Responses API ``response`` object (non-streaming)."""
+    choice = (payload.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    text = msg.get("content") or ""
+    usage = payload.get("usage") or {}
+    msg_id = f"msg_{uuid.uuid4().hex}"
+    return {
+        "id": f"resp_{uuid.uuid4().hex}",
+        "object": "response",
+        "created_at": payload.get("created") or int(time.time()),
+        "model": payload.get("model") or model,
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": msg_id,
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+        "output_text": text,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+
+
+def _responses_event(seq: int, event_type: str, payload: Dict[str, Any]) -> str:
+    """Render one Responses API SSE event (both ``event:`` and ``data:`` lines)."""
+    data = {"type": event_type, "sequence_number": seq, **payload}
+    return f"event: {event_type}\ndata: {_json.dumps(data)}\n\n"
+
+
+async def _responses_sse_stream(
+    model: str, messages: List[Dict[str, Any]], openai_kwargs: Dict[str, Any]
+):
+    """Bridge a chat-completion stream into the Responses API ``response.*``
+    SSE event sequence (created → output_item/content_part added →
+    output_text.delta* → *.done → completed)."""
+    rid = f"resp_{uuid.uuid4().hex}"
+    msg_id = f"msg_{uuid.uuid4().hex}"
+    created = int(time.time())
+    seq = 0
+
+    def base(status: str, output: List[Dict[str, Any]], usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        r: Dict[str, Any] = {
+            "id": rid, "object": "response", "created_at": created,
+            "model": model, "status": status, "output": output,
+        }
+        if usage is not None:
+            r["usage"] = usage
+        return r
+
+    yield _responses_event(seq, "response.created", {"response": base("in_progress", [])}); seq += 1
+    item_stub = {"id": msg_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []}
+    yield _responses_event(seq, "response.output_item.added", {"output_index": 0, "item": item_stub}); seq += 1
+    yield _responses_event(seq, "response.content_part.added", {
+        "item_id": msg_id, "output_index": 0, "content_index": 0,
+        "part": {"type": "output_text", "text": "", "annotations": []},
+    }); seq += 1
+
+    parts: List[str] = []
+    usage_out = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    async with _get_semaphore():
+        try:
+            async for chunk in _adapter.chat_completion_stream_async(
+                model=model, messages=messages, **openai_kwargs
+            ):
+                cd = chunk.model_dump(exclude_none=True)
+                ch = (cd.get("choices") or [{}])[0]
+                delta = (ch.get("delta") or {}).get("content")
+                if delta:
+                    parts.append(delta)
+                    yield _responses_event(seq, "response.output_text.delta", {
+                        "item_id": msg_id, "output_index": 0, "content_index": 0, "delta": delta,
+                    }); seq += 1
+                u = cd.get("usage")
+                if u:
+                    usage_out = {
+                        "input_tokens": u.get("prompt_tokens", 0),
+                        "output_tokens": u.get("completion_tokens", 0),
+                        "total_tokens": u.get("total_tokens", 0),
+                    }
+        except PaymentError as exc:
+            yield _responses_event(seq, "response.failed", {
+                "response": base("failed", []),
+                "error": {"code": "payment_error", "message": _payment_error_sse_message(exc)},
+            })
+            return
+        except APIError as exc:
+            yield _responses_event(seq, "response.failed", {
+                "response": base("failed", []),
+                "error": {"code": "upstream_error", "message": str(exc)},
+            })
+            return
+        except Exception as exc:  # noqa: BLE001
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error during responses stream: %s", _solana_rpc_msg(exc))
+                msg = _solana_rpc_msg(exc)
+            else:
+                log.exception("responses stream error")
+                msg = str(exc)
+            yield _responses_event(seq, "response.failed", {
+                "response": base("failed", []),
+                "error": {"code": "server_error", "message": msg},
+            })
+            return
+
+    text = "".join(parts)
+    yield _responses_event(seq, "response.output_text.done", {
+        "item_id": msg_id, "output_index": 0, "content_index": 0, "text": text,
+    }); seq += 1
+    yield _responses_event(seq, "response.content_part.done", {
+        "item_id": msg_id, "output_index": 0, "content_index": 0,
+        "part": {"type": "output_text", "text": text, "annotations": []},
+    }); seq += 1
+    final_item = {
+        "id": msg_id, "type": "message", "status": "completed", "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    yield _responses_event(seq, "response.output_item.done", {"output_index": 0, "item": final_item}); seq += 1
+    yield _responses_event(seq, "response.completed", {"response": base("completed", [final_item], usage_out)})
+
+
+@app.post("/v1/responses", dependencies=[Depends(_require_token)])
+async def responses(request: Request) -> Any:
+    """OpenAI Responses API bridge → BlockRun Chat Completions."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    model, messages, openai_kwargs, stream = _responses_to_chat(body)
+    if not model or not messages:
+        raise HTTPException(400, "`model` and `input` are required")
+
+    if stream:
+        return StreamingResponse(
+            _responses_sse_stream(model, messages, openai_kwargs),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    async with _get_semaphore():
+        try:
+            payload = await _adapter.chat_completion_async(
+                model=model, messages=messages, **openai_kwargs
+            )
+        except PaymentError as exc:
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+        except Exception as exc:
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error: %s", _solana_rpc_msg(exc))
+                raise HTTPException(503, _solana_rpc_msg(exc))
+            raise
+
+    return _chat_payload_to_response(payload, model)
 
 
 # ---------------------------------------------------------------------------
