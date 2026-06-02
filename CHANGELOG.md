@@ -16,6 +16,14 @@
   `provider_specific_fields` (new `_native_extras()` helper in `provider.py`).
 
 ### Changed
+- **`blockrun-llm` floor raised to `>=0.37.0`** (runtime + `[solana]` extra) for
+  concurrency-safe Solana payments. The adapter shares one cached SDK client
+  across the proxy's concurrent requests; with the older floor that shared client
+  raced on x402 nonce/auth state under load and returned a small fraction of
+  `Payment verification failed` / `authorization already used` rejections. 0.37.0
+  adds a per-client signing lock + whole-request payment retry, taking concurrent
+  single-wallet load to ~100% (verified opus-4.7 / gemini-3.1-pro / gpt-5.5
+  100/100 at concurrency 10). No proxy code change needed — the bump is enough.
 - **Model ids aligned to the current gateway flagships** across the example
   config, README, and example scripts: `anthropic/claude-opus-4-5` →
   `anthropic/claude-opus-4-7`, `google/gemini-3-pro` → `google/gemini-3.1-pro`.
