@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.10 — 2026-06-01
 
 ### Added
 - **Native fingerprint passthrough is now guaranteed and tested.** The gateway
