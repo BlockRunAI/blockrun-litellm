@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.12 — 2026-06-10
+
+### Fixed
+- **Provider-mode streaming now forwards the gateway's end-of-stream `usage`
+  frame.** The gateway (paired change: blockrun-sol #20 / blockrun #137) emits
+  the OpenAI `include_usage` final frame (`choices: [] + usage`) carrying the
+  real upstream token counts. `_to_generic_chunk` previously returned
+  `usage=None` on the choice-less branch, so LiteLLM never saw those counts and
+  re-estimated the prompt with its own tokenizer (~37% drift vs the real
+  Anthropic count). The choice-less branch now forwards `chunk.usage` when
+  present; older gateways that never send the frame hit the `usage=None` path
+  unchanged.
+- **The forwarding contract is locked in by `tests/test_stream_usage.py`.**
+  The usage frame arrives *after* the finish-reason chunk, and LiteLLM's
+  `CustomStreamWrapper` drops any post-finish chunk whose dict lacks the
+  `provider_specific_fields` key — the frame only survives because
+  `_to_generic_chunk` always emits that key (added in 0.3.10's fingerprint
+  passthrough). New tests cover the token counts (unit + end-to-end through
+  the real `CustomStreamWrapper` / `stream_chunk_builder`), the key-presence
+  contract, and a canary that fails if LiteLLM's post-finish guard ever
+  changes.
+
 ## 0.3.11 — 2026-06-01
 
 ### Added
