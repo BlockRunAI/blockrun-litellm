@@ -150,14 +150,23 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
     structure that the streaming handler stitches into a final response.
     """
     if not chunk.choices:
-        # Defensive: BlockRun shouldn't emit chunks without a choice, but
-        # if it ever does we emit an empty heartbeat chunk so the consumer
-        # iterator doesn't break.
+        # A choice-less chunk is the OpenAI `include_usage` final frame
+        # (choices:[] + usage). Forward its real token counts so LiteLLM bills
+        # off them instead of re-estimating the prompt with its own tokenizer
+        # (tiktoken drifts ~37% vs the gateway's real upstream count). Older
+        # gateways that never send this frame still hit the usage=None path.
+        usage = None
+        if chunk.usage is not None:
+            usage = {
+                "prompt_tokens": chunk.usage.prompt_tokens,
+                "completion_tokens": chunk.usage.completion_tokens,
+                "total_tokens": chunk.usage.total_tokens,
+            }
         return GenericStreamingChunk(
             text="",
             is_finished=False,
             finish_reason="",
-            usage=None,
+            usage=usage,
             index=0,
         )
 
