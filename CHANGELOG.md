@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.11 — 2026-06-01
+
+### Added
+- **OpenAI Responses API bridge — `POST /v1/responses`.** The sidecar previously
+  404'd on `/v1/responses` (only Chat Completions was implemented), so LiteLLM
+  clients calling the Responses API got `NotFoundError`. It now accepts a
+  Responses request (`input` as string or item list, `instructions`,
+  `temperature`, `top_p`, `max_output_tokens`, `tools`), translates it to a chat
+  completion against the gateway, and translates the result back: a `response`
+  object (with `output[]`, `output_text`, `usage.input/output/total_tokens`) for
+  non-streaming, or the canonical `response.*` SSE event sequence
+  (`response.created` → `output_item.added` → `content_part.added` →
+  `output_text.delta*` → `*.done` → `response.completed`) when `stream=True`.
+  Text-in/text-out is fully bridged; Responses-only state (tools-as-state,
+  reasoning items, `previous_response_id`, `store`) is not round-tripped — use
+  `/v1/chat/completions` for those. New `tests/test_responses.py`.
+
+## 0.3.10 — 2026-06-01
+
+### Added
+- **Native fingerprint passthrough is now guaranteed and tested.** The gateway
+  returns the upstream provider's response verbatim, so relay-detection signals
+  (`system_fingerprint`, `service_tier`, `usage.prompt_tokens_details` /
+  `cache_read_input_tokens` / `cache_creation_input_tokens`, per-message
+  `reasoning_content`) survive both integration modes. New
+  `tests/test_fingerprint.py` locks the contract so a future LiteLLM / SDK bump
+  can't silently strip them. New README section "Native fingerprint passthrough".
+- **Provider-mode streaming now carries the native fingerprint.** The lossy
+  `GenericStreamingChunk` previously dropped everything but text/usage; chunk
+  extras (`system_fingerprint`, `service_tier`) are now surfaced via
+  `provider_specific_fields` (new `_native_extras()` helper in `provider.py`).
+
+### Changed
+- **`blockrun-llm` floor raised to `>=0.37.0`** (runtime + `[solana]` extra) for
+  concurrency-safe Solana payments. The adapter shares one cached SDK client
+  across the proxy's concurrent requests; with the older floor that shared client
+  raced on x402 nonce/auth state under load and returned a small fraction of
+  `Payment verification failed` / `authorization already used` rejections. 0.37.0
+  adds a per-client signing lock + whole-request payment retry, taking concurrent
+  single-wallet load to ~100% (verified opus-4.7 / gemini-3.1-pro / gpt-5.5
+  100/100 at concurrency 10). No proxy code change needed — the bump is enough.
+- **Model ids aligned to the current gateway flagships** across the example
+  config, README, and example scripts: `anthropic/claude-opus-4-5` →
+  `anthropic/claude-opus-4-7`, `google/gemini-3-pro` → `google/gemini-3.1-pro`.
+  `openai/gpt-5.5` unchanged.
+
 ## 0.3.8 — 2026-05-27
 
 ### Fixed

@@ -131,7 +131,19 @@ def _collect_openai_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_response(model: str, payload: Dict[str, Any]) -> litellm.ModelResponse:
-    """Wrap a BlockRun-dumped dict into a ``litellm.ModelResponse``."""
+    """Wrap a BlockRun-dumped dict into a ``litellm.ModelResponse``.
+
+    Native-fingerprint passthrough: the gateway returns the upstream
+    provider's response verbatim, so the dumped dict carries the real
+    relay-detection signals — ``system_fingerprint`` (GPT ``fp_*``),
+    ``service_tier``, ``usage.prompt_tokens_details`` /
+    ``usage.cache_read_input_tokens`` / ``cache_creation_input_tokens``,
+    and per-message ``reasoning_content``. ``litellm.ModelResponse``
+    preserves all of these as first-class or extra fields, so a relay
+    detector (e.g. cctest.ai) sees a genuine direct upstream call. The
+    regression suite in ``tests/test_fingerprint.py`` locks this in so a
+    future LiteLLM / SDK bump can't silently strip them.
+    """
     # The payload from blockrun-llm already includes the model field. We pop
     # it to avoid the duplicate-kwarg TypeError, then re-inject the
     # caller-supplied id so callers see the model they actually asked for
@@ -139,6 +151,25 @@ def _build_response(model: str, payload: Dict[str, Any]) -> litellm.ModelRespons
     payload = dict(payload)
     payload.pop("model", None)
     return litellm.ModelResponse(**payload, model=model)
+
+
+def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
+    """Collect the upstream-native fingerprint fields carried on a stream
+    chunk (e.g. ``system_fingerprint``, ``service_tier``) so they survive
+    the lossy :class:`GenericStreamingChunk` contract.
+
+    ``ChatCompletionChunk`` is declared ``extra = "allow"`` in blockrun-llm,
+    so any top-level field the gateway forwards that isn't part of the
+    OpenAI chunk schema lands in ``model_extra``. We surface those plus the
+    usage-level cache/details extras through ``provider_specific_fields`` so
+    in-process LiteLLM streaming callers can still read the genuine signals.
+    """
+    extras: Dict[str, Any] = dict(chunk.model_extra or {})
+    if chunk.usage is not None:
+        usage_extra = chunk.usage.model_extra or {}
+        if usage_extra:
+            extras.setdefault("usage_details", {}).update(usage_extra)
+    return extras
 
 
 def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
@@ -149,6 +180,12 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
     LiteLLM's ``GenericStreamingChunk`` is a simpler, provider-agnostic
     structure that the streaming handler stitches into a final response.
     """
+    # Native fingerprint fields ride on every chunk (OpenAI sends
+    # ``system_fingerprint`` per chunk), so collect them regardless of whether
+    # this chunk carries a choice, and surface via ``provider_specific_fields``.
+    extras = _native_extras(chunk)
+    provider_specific_fields = extras or None
+
     if not chunk.choices:
         # A choice-less chunk is the OpenAI `include_usage` final frame
         # (choices:[] + usage). Forward its real token counts so LiteLLM bills
@@ -168,6 +205,7 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
             finish_reason="",
             usage=usage,
             index=0,
+            provider_specific_fields=provider_specific_fields,
         )
 
     choice = chunk.choices[0]
@@ -189,6 +227,7 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
         finish_reason=finish_reason,
         usage=usage,
         index=choice.index,
+        provider_specific_fields=provider_specific_fields,
     )
 
 

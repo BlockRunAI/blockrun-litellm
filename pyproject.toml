@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.3.9"
+version = "0.3.11"
 description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
 readme = "README.md"
 license = "MIT"
@@ -26,14 +26,17 @@ classifiers = [
 ]
 
 dependencies = [
-    "blockrun-llm>=0.32.0",
+    # >=0.37.0: concurrency-safe Solana payments (per-client signing lock +
+    # whole-request payment retry) so the shared cached client in _adapter is
+    # reliable under the proxy's concurrent load. See blockrun-llm 0.37.0.
+    "blockrun-llm>=0.37.0",
     "litellm>=1.40.0",
 ]
 
 [project.optional-dependencies]
 # Re-exported here so `pip install 'blockrun-litellm[solana]'` pulls the
 # x402 SVM toolchain that SolanaLLMClient needs (x402 SDK + solders).
-solana = ["blockrun-llm[solana]>=0.32.0"]
+solana = ["blockrun-llm[solana]>=0.37.0"]
 proxy = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",

@@ -120,7 +120,7 @@ print(response.choices[0].message.content)
 print(response.usage)  # prompt_tokens / completion_tokens / total_tokens
 ```
 
-The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-5.5`, `anthropic/claude-opus-4-5`, `google/gemini-3-pro`, etc. all work — anything in BlockRun's catalog.
+The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-5.5`, `anthropic/claude-opus-4-7`, `google/gemini-3.1-pro`, etc. all work — anything in BlockRun's catalog.
 
 ### 1c. Override the wallet per-call (optional)
 
@@ -275,6 +275,7 @@ curl http://localhost:4001/v1/chat/completions \
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
+| `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
 | `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
@@ -322,6 +323,47 @@ BlockRun-specific extras (also accepted):
 | `search: True` | Enable xAI Live Search (for search-enabled models) |
 | `search_parameters: {...}` | Full Live Search config |
 | `fallback_models: ["..."]` | Auto-retry on transient upstream errors |
+
+---
+
+## Native fingerprint passthrough
+
+BlockRun returns the **upstream provider's response verbatim** — no model
+substitution, no response reshaping. The relay-detection signals a tool like
+`cctest.ai` inspects therefore survive end to end, so the call looks like a
+genuine **direct** upstream request rather than a proxied one:
+
+| Signal | Where | Models |
+|---|---|---|
+| `system_fingerprint` (`fp_*`) | top-level response | OpenAI (`openai/gpt-5.5`, …) |
+| `service_tier` | top-level response | OpenAI |
+| `usage.prompt_tokens_details.cached_tokens` | usage block | OpenAI |
+| `usage.cache_read_input_tokens` / `cache_creation_input_tokens` | usage block | Anthropic (`anthropic/claude-opus-4-7`, …) |
+| `reasoning_content` | per message | reasoning models |
+
+Both integration modes preserve these:
+
+- **Proxy mode** returns the OpenAI-shaped JSON verbatim, so every field above
+  is present on the wire.
+- **Provider mode** keeps them on the `litellm.ModelResponse` (`response.system_fingerprint`,
+  `response.usage`, `response.choices[0].message.reasoning_content`). In
+  streaming, the lossy `GenericStreamingChunk` carries them on
+  `provider_specific_fields`.
+
+```python
+resp = litellm.completion(model="blockrun/openai/gpt-5.5", messages=[...])
+print(resp.system_fingerprint)   # e.g. "fp_abc123" — the real upstream value
+```
+
+> **Note:** Claude's native thinking-block `signature` is an Anthropic
+> `/v1/messages`-only field. The litellm package speaks OpenAI
+> `/v1/chat/completions`, so it surfaces `reasoning_content` and the cache-token
+> usage but not the raw `signature`. For full Anthropic-native passthrough
+> (content blocks + `signature`), use the `blockrun-llm-vip` `Anthropic` client.
+
+Verified flagship models: **`openai/gpt-5.5`**, **`anthropic/claude-opus-4-7`**,
+**`google/gemini-3.1-pro`**. The contract is locked by
+`tests/test_fingerprint.py`.
 
 ---
 
