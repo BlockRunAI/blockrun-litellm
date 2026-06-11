@@ -94,9 +94,9 @@ def test_blockrun_specific_kwargs_pass_through(stub_sync_client) -> None:
 @pytest.mark.asyncio
 async def test_async_round_trip(stub_async_client) -> None:
     payload = await _adapter.chat_completion_async(
-        model="anthropic/claude-opus-4-7",
+        model="anthropic/claude-fable-5",
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=32,
     )
-    assert payload["model"] == "anthropic/claude-opus-4-7"
+    assert payload["model"] == "anthropic/claude-fable-5"
     assert payload["choices"][0]["message"]["content"] == "stub-response"

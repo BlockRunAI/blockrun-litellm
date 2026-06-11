@@ -35,7 +35,7 @@ def test_completion_returns_model_response(stub_sync_client) -> None:
 async def test_acompletion_returns_model_response(stub_async_client) -> None:
     handler = BlockRunLLM()
     response = await handler.acompletion(
-        model="anthropic/claude-opus-4-7",
+        model="anthropic/claude-fable-5",
         messages=[{"role": "user", "content": "hi"}],
         optional_params={"max_tokens": 16},
     )
