@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.13 — 2026-06-11
+
+### Fixed
+- **Streaming `reasoning_content` is now forwarded instead of dropped.**
+  Thinking-enabled Claude (Bedrock / direct Anthropic) and native reasoning
+  models (DeepSeek R1, GLM thinking) emit their chain-of-thought on the streamed
+  delta (`choices[0].delta.reasoning_content`). LiteLLM's
+  `GenericStreamingChunk` has no reasoning field and the custom-provider stream
+  handler never promotes it onto `delta.reasoning_content`, so
+  `_to_generic_chunk` previously lost it on every streamed call. It now routes
+  the delta's reasoning into `provider_specific_fields` — the only channel a
+  CustomLLM provider has to a live streaming consumer, readable at
+  `delta.provider_specific_fields["reasoning_content"]`. Non-stream reasoning is
+  unchanged (it already survives verbatim on `message.reasoning_content`). New
+  `tests/test_reasoning.py` covers the unit mapping and an end-to-end pass
+  through the real `CustomStreamWrapper`.
+  - Pairs with the gateway change (blockrun-sol) that forwards extended
+    `thinking` to the Bedrock path and emits `reasoning_content` deltas, so a
+    Bedrock-served Claude stream now carries reasoning end-to-end.
+  - Caveat (LiteLLM limitation): `stream_chunk_builder` does not preserve
+    per-chunk `provider_specific_fields`, so a reassembled message will not carry
+    `reasoning_content`. Read it from the live delta, or use non-stream for the
+    assembled field.
+
 ## 0.3.12 — 2026-06-10
 
 ### Fixed

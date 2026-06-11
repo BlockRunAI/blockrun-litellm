@@ -212,6 +212,19 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
     text = choice.delta.content or ""
     finish_reason = choice.finish_reason or ""
 
+    # Reasoning-model output (thinking-enabled Claude, DeepSeek R1, GLM thinking)
+    # rides on the delta as ``reasoning_content``. ``GenericStreamingChunk`` has
+    # no reasoning field and LiteLLM's custom-provider stream handler never
+    # promotes it onto ``delta.reasoning_content``, so route it through
+    # ``provider_specific_fields`` — the only channel a CustomLLM provider has to
+    # a live streaming consumer (readable at
+    # ``delta.provider_specific_fields["reasoning_content"]``). Without this it is
+    # dropped on the floor for every streamed call.
+    reasoning = getattr(choice.delta, "reasoning_content", None)
+    if reasoning:
+        extras = {**(extras or {}), "reasoning_content": reasoning}
+        provider_specific_fields = extras
+
     # BlockRun's per-chunk usage is rarely populated; LiteLLM tolerates None.
     usage = None
     if chunk.usage is not None:
