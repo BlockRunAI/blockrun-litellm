@@ -75,7 +75,7 @@ def test_solana_client_routes_through_sync_factory(monkeypatch):
     instances: list[Any] = []
 
     class FakeSolanaClient:
-        def __init__(self, *, private_key=None, api_url=None):
+        def __init__(self, *, private_key=None, api_url=None, **kwargs):
             instances.append({"private_key": private_key, "api_url": api_url})
 
     # Reset the module-level cache so the patched class is used.
@@ -127,7 +127,7 @@ def test_image_client_routes_to_solana(monkeypatch):
     instances: list[Any] = []
 
     class FakeSolanaClient:
-        def __init__(self, *, private_key=None, api_url=None):
+        def __init__(self, *, private_key=None, api_url=None, **kwargs):
             instances.append({"private_key": private_key, "api_url": api_url})
 
     monkeypatch.setattr(_adapter, "_image_clients", {})
@@ -174,7 +174,7 @@ def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
             return {"data": [{"url": "https://example/img.png"}]}
 
     class FakeSolanaClient:
-        def __init__(self, *, private_key=None, api_url=None):
+        def __init__(self, *, private_key=None, api_url=None, **kwargs):
             pass
 
         def image(self, prompt, *, model=None, size=None, n=1):
@@ -200,3 +200,53 @@ def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
         "size": "1024x1024",
         "n": 1,
     }
+
+
+def test_solana_image_client_sets_image_timeout(monkeypatch):
+    """get_image_client must raise the SDK's image-request timeout ceiling.
+
+    The SDK caps each image POST at ``image_timeout`` (SolanaLLMClient default
+    200s — see blockrun_llm.solana_client.DEFAULT_IMAGE_TIMEOUT). Slow models
+    such as ``openai/gpt-image-2`` can exceed 200s on the synchronous Solana
+    path, so the adapter raises ``image_timeout`` (NOT the general ``timeout``,
+    which is the chat baseline and is overridden per-request for images).
+    """
+    captured: dict = {}
+
+    class FakeSolanaClient:
+        def __init__(self, *, private_key=None, api_url=None, image_timeout=None, **kwargs):
+            captured["image_timeout"] = image_timeout
+
+    monkeypatch.delenv("BLOCKRUN_SOLANA_IMAGE_TIMEOUT", raising=False)
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    _adapter.get_image_client(api_url="https://sol.blockrun.ai/api", private_key="bogus")
+
+    assert captured["image_timeout"] is not None, "image_timeout must be passed explicitly"
+    assert captured["image_timeout"] >= 200.0, (
+        f"image_timeout {captured['image_timeout']}s is not above the slow-image "
+        "generation tail (gpt-image-2 can exceed the 200s SDK default)"
+    )
+
+
+def test_solana_image_timeout_env_override(monkeypatch):
+    """``BLOCKRUN_SOLANA_IMAGE_TIMEOUT`` lets ops tune the ceiling without a redeploy.
+
+    Read at call time (not import time), so no module reload is needed.
+    """
+    captured: dict = {}
+
+    class FakeSolanaClient:
+        def __init__(self, *, private_key=None, api_url=None, image_timeout=None, **kwargs):
+            captured["image_timeout"] = image_timeout
+
+    monkeypatch.setenv("BLOCKRUN_SOLANA_IMAGE_TIMEOUT", "420")
+    monkeypatch.setattr(_adapter, "_image_clients", {})
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    _adapter.get_image_client(api_url="https://sol.blockrun.ai/api", private_key="bogus")
+
+    assert captured["image_timeout"] == 420.0

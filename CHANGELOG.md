@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.14 — 2026-06-11
+
+### Fixed
+- **Slow Solana image models no longer time out mid-generation.** The image
+  `SolanaLLMClient` is now constructed with an explicit `image_timeout` (default
+  300s, overridable via `BLOCKRUN_SOLANA_IMAGE_TIMEOUT`). `openai/gpt-image-2`
+  can take well past the SDK's 200s `image_timeout` default on the synchronous
+  Solana path; under the default the sidecar threw `httpx.ReadTimeout` before
+  the gateway returned the image, surfacing as a 500 (and LiteLLM-Proxy retries)
+  even though the gateway had produced the result.
+  - This supersedes the original community PR (#1, thanks @KillerQueen-Z), which
+    set the general `timeout=` kwarg. Against the current `blockrun-llm` SDK that
+    is the **chat** baseline and is overridden per-request for images
+    (`_request_image_with_payment` applies `image_timeout`), so it never reached
+    image calls. The dedicated `image_timeout=` is the knob that governs them.
+  - `tests/test_adapter_solana.py` asserts `image_timeout` is passed (≥ the slow
+    tail) and that the env override applies (read at call time, no module reload).
+
 ## 0.3.13 — 2026-06-11
 
 ### Fixed

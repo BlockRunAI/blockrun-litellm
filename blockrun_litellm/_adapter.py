@@ -300,6 +300,23 @@ async def chat_completion_stream_async(
 # ImageClient is sync-only in blockrun-llm; async callers run it in a thread.
 
 
+# Per-image-request timeout (seconds) for the Solana image client. Default 300s
+# leaves headroom above the SDK's 200s ``image_timeout`` for the slow tail of
+# ``openai/gpt-image-2`` (public reports cite 145-280s). Read at call time so
+# ``BLOCKRUN_SOLANA_IMAGE_TIMEOUT`` can be tuned without a process restart.
+_DEFAULT_SOLANA_IMAGE_TIMEOUT_S = 300.0
+
+
+def _solana_image_timeout() -> float:
+    raw = os.environ.get("BLOCKRUN_SOLANA_IMAGE_TIMEOUT")
+    if not raw:
+        return _DEFAULT_SOLANA_IMAGE_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_SOLANA_IMAGE_TIMEOUT_S
+
+
 def get_image_client(
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
@@ -328,6 +345,18 @@ def get_image_client(
                 client = SolanaLLMClient(
                     private_key=private_key,
                     api_url=api_url or SOLANA_API_URL,
+                    # Raise the per-image-request timeout ceiling. The SDK caps
+                    # each image POST at ``image_timeout`` (SolanaLLMClient
+                    # default 200s); slow models such as ``openai/gpt-image-2``
+                    # can exceed that on the synchronous Solana path, so the
+                    # sidecar would otherwise throw ``httpx.ReadTimeout`` mid-
+                    # generation. NOTE: the general ``timeout=`` kwarg is the
+                    # chat baseline and is overridden per-request for images
+                    # (``_request_image_with_payment`` passes ``image_timeout``),
+                    # so ``image_timeout=`` is the knob that actually governs
+                    # image calls. Tunable via BLOCKRUN_SOLANA_IMAGE_TIMEOUT
+                    # for ops without a redeploy.
+                    image_timeout=_solana_image_timeout(),
                 )
             else:
                 client = ImageClient(private_key=private_key, api_url=api_url)
