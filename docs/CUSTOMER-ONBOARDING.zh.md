@@ -233,9 +233,9 @@ model_list:
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
-  - model_name: claude-opus-4-7
+  - model_name: claude-fable-5
     litellm_params:
-      model: openai/anthropic/claude-opus-4-7
+      model: openai/anthropic/claude-fable-5
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
@@ -407,7 +407,7 @@ LiteLLM router 配置直接生效：
 router_settings:
   num_retries: 2
   fallbacks:
-    - {"gpt-5.5": ["claude-opus-4-7"]}   # gpt-5.5 出 503 自动切 claude
+    - {"gpt-5.5": ["claude-fable-5"]}   # gpt-5.5 出 503 自动切 claude
 ```
 
 SDK 自身也会做 5xx 退避重试 3 次（1s / 2s / 4s），大部分临时抖动都自愈了。

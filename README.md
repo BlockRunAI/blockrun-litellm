@@ -120,7 +120,7 @@ print(response.choices[0].message.content)
 print(response.usage)  # prompt_tokens / completion_tokens / total_tokens
 ```
 
-The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-5.5`, `anthropic/claude-opus-4-7`, `google/gemini-3.1-pro`, etc. all work — anything in BlockRun's catalog.
+The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-5.5`, `anthropic/claude-fable-5`, `google/gemini-3.1-pro`, etc. all work — anything in BlockRun's catalog.
 
 ### 1c. Override the wallet per-call (optional)
 
@@ -214,9 +214,9 @@ model_list:
       api_base: http://localhost:4001/v1
       api_key: "dummy"                # ignored if BLOCKRUN_PROXY_TOKEN is unset
 
-  - model_name: claude-opus-4-7
+  - model_name: claude-fable-5
     litellm_params:
-      model: openai/anthropic/claude-opus-4-7
+      model: openai/anthropic/claude-fable-5
       api_base: http://localhost:4001/v1
       api_key: "dummy"
 
@@ -338,7 +338,7 @@ genuine **direct** upstream request rather than a proxied one:
 | `system_fingerprint` (`fp_*`) | top-level response | OpenAI (`openai/gpt-5.5`, …) |
 | `service_tier` | top-level response | OpenAI |
 | `usage.prompt_tokens_details.cached_tokens` | usage block | OpenAI |
-| `usage.cache_read_input_tokens` / `cache_creation_input_tokens` | usage block | Anthropic (`anthropic/claude-opus-4-7`, …) |
+| `usage.cache_read_input_tokens` / `cache_creation_input_tokens` | usage block | Anthropic (`anthropic/claude-fable-5`, …) |
 | `reasoning_content` | per message | reasoning models |
 
 Both integration modes preserve these:
@@ -361,7 +361,7 @@ print(resp.system_fingerprint)   # e.g. "fp_abc123" — the real upstream value
 > usage but not the raw `signature`. For full Anthropic-native passthrough
 > (content blocks + `signature`), use the `blockrun-llm-vip` `Anthropic` client.
 
-Verified flagship models: **`openai/gpt-5.5`**, **`anthropic/claude-opus-4-7`**,
+Verified flagship models: **`openai/gpt-5.5`**, **`anthropic/claude-fable-5`**,
 **`google/gemini-3.1-pro`**. The contract is locked by
 `tests/test_fingerprint.py`.
 

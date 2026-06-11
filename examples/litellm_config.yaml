@@ -29,9 +29,9 @@ model_list:
       api_base: http://localhost:4001/v1
       api_key: "dummy"
 
-  - model_name: claude-opus-4-7
+  - model_name: claude-fable-5
     litellm_params:
-      model: openai/anthropic/claude-opus-4-7
+      model: openai/anthropic/claude-fable-5
       api_base: http://localhost:4001/v1
       api_key: "dummy"
 

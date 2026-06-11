@@ -218,9 +218,9 @@ model_list:
       api_base: http://127.0.0.1:4001/v1      # the BlockRun sidecar
       api_key: "dummy"                        # not used; sidecar handles auth
 
-  - model_name: claude-opus-4-7
+  - model_name: claude-fable-5
     litellm_params:
-      model: openai/anthropic/claude-opus-4-7
+      model: openai/anthropic/claude-fable-5
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
@@ -280,7 +280,7 @@ You should see:
    ...
 LiteLLM: Proxy initialized with Config, Set models:
     gpt-5.5
-    claude-opus-4-7
+    claude-fable-5
     deepseek-v4-flash
     gemini-3.1-pro
 INFO:     Uvicorn running on http://127.0.0.1:4000

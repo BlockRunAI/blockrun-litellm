@@ -32,7 +32,7 @@ def sync_example() -> None:
 
 async def async_example() -> None:
     response = await litellm.acompletion(
-        model="blockrun/anthropic/claude-opus-4-7",
+        model="blockrun/anthropic/claude-fable-5",
         messages=[{"role": "user", "content": "Reverse the word 'banana'."}],
         max_tokens=32,
     )

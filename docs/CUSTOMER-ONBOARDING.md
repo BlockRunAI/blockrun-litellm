@@ -353,7 +353,7 @@ So your existing LiteLLM router config — `num_retries`, `fallbacks`, `cooldown
 router_settings:
   num_retries: 2
   fallbacks:
-    - {"gpt-5.5-base": ["claude-opus-4-7"]}
+    - {"gpt-5.5-base": ["claude-fable-5"]}
 ```
 
 Plus the SDK itself retries 5xx in-band 3 times with exponential backoff (1s / 2s / 4s) before bubbling the error up.
