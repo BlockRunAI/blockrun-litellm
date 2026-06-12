@@ -184,99 +184,6 @@ def _payment_error_sse_message(exc: PaymentError) -> str:
     return msg
 
 
-def _openai_error_event(message: str, code: int = 500) -> str:
-    """Render an error as an SSE ``data:`` line in OpenAI's error schema.
-
-    The openai Python SDK (v1.x, Rust parser) recognises ``{"error": {...}}``
-    streaming events only when the nested object uses OpenAI's exact field
-    names: ``message``, ``type``, ``param``, ``code``.  Non-conforming shapes
-    (e.g. a ``status`` key instead of ``code``) cause the Rust untagged-enum
-    parser to fail with "data did not match any variant", which LiteLLM then
-    wraps as a confusing ``MidStreamFallbackError``.
-    """
-    payload = {
-        "error": {
-            "message": message,
-            "type": "upstream_error",
-            "param": None,
-            "code": str(code),
-        }
-    }
-    return f"data: {_json.dumps(payload)}\n\n"
-
-
-async def _sse_event_stream(
-    model: str,
-    messages: List[Dict[str, Any]],
-    openai_kwargs: Dict[str, Any],
-):
-    """Async generator that renders BlockRun chunks as OpenAI SSE events.
-
-    Each chunk is emitted as ``data: <json>\\n\\n`` (OpenAI convention),
-    followed by a terminating ``data: [DONE]\\n\\n`` once the upstream
-    iterator drains. Errors during streaming are surfaced as a final
-    ``data: {"error": ...}`` event before the [DONE], since headers
-    have already been flushed.
-
-    Concurrency note: the semaphore is held only until the first chunk
-    arrives from upstream — covering the x402 probe + sign + HTTP handshake.
-    The remaining chunks stream freely without occupying a semaphore slot,
-    so a slow client reading at 1 token/s does not block 100 other callers.
-    """
-    stream_gen = _adapter.chat_completion_stream_async(
-        model=model, messages=messages, **openai_kwargs
-    )
-
-    # Phase 1: acquire semaphore, establish upstream connection, get first chunk.
-    first_chunk_data: Optional[str] = None
-    error_event: Optional[str] = None
-
-    async with _get_semaphore():
-        try:
-            first_obj = await stream_gen.__anext__()
-            first_chunk_data = f"data: {_json.dumps(first_obj.model_dump(exclude_none=True))}\n\n"
-        except StopAsyncIteration:
-            pass  # empty stream — unusual but not fatal
-        except PaymentError as exc:
-            error_event = _openai_error_event(_payment_error_sse_message(exc), code=402)
-        except APIError as exc:
-            error_event = _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
-        except Exception as exc:
-            if _is_solana_rpc_exc(exc):
-                log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
-                error_event = _openai_error_event(_solana_rpc_msg(exc), code=503)
-            else:
-                log.exception("stream error (first chunk)")
-                error_event = _openai_error_event(str(exc), code=500)
-
-    # Semaphore released — emit first chunk or error, then stream the rest.
-    if error_event:
-        yield error_event
-        yield "data: [DONE]\n\n"
-        return
-
-    if first_chunk_data:
-        yield first_chunk_data
-
-    # Phase 2: drain remaining chunks without holding the semaphore.
-    try:
-        async for chunk in stream_gen:
-            yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
-    except PaymentError as exc:
-        yield _openai_error_event(_payment_error_sse_message(exc), code=402)
-    except APIError as exc:
-        yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
-    except Exception as exc:
-        if _is_solana_rpc_exc(exc):
-            log.warning("solana rpc error during stream: %s", _solana_rpc_msg(exc))
-            yield _openai_error_event(_solana_rpc_msg(exc), code=503)
-        else:
-            log.exception("stream error")
-            yield _openai_error_event(str(exc), code=500)
-
-    yield "data: [DONE]\n\n"
-
-
 @app.post("/v1/chat/completions", dependencies=[Depends(_require_token)])
 async def chat_completions(request: Request) -> Any:
     # Verbatim x402-signed passthrough to the gateway's native
@@ -460,7 +367,7 @@ async def _forward_passthrough(
     if wants_stream:
         # Hold the semaphore across the paid upstream connection (x402 probe +
         # sign + handshake) — released before the body drain so a slow reader
-        # doesn't keep a slot. Mirrors _sse_event_stream's two-phase approach.
+        # reading at 1 tok/s doesn't keep a slot and block other callers.
         async with _get_semaphore():
             resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
 
