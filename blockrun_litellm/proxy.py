@@ -7,10 +7,13 @@ key lives in this process — clients on the same host never see it.
 
 Endpoints
 ---------
-- ``POST /v1/chat/completions``    — OpenAI Chat Completions
-- ``POST /v1/images/generations``  — OpenAI Image Generations (DALL-E compatible)
-- ``GET  /v1/models``              — passthrough to BlockRun's chat catalog
-- ``GET  /healthz``                — liveness probe (no upstream call)
+- ``POST /v1/chat/completions``      — OpenAI Chat Completions
+- ``POST /v1/messages``              — native Anthropic Messages (Claude Code,
+  Anthropic SDK); verbatim x402-signed passthrough — tools/thinking preserved
+- ``POST /v1/messages/count_tokens`` — Anthropic token counting (passthrough)
+- ``POST /v1/images/generations``    — OpenAI Image Generations (DALL-E compatible)
+- ``GET  /v1/models``                — passthrough to BlockRun's chat catalog
+- ``GET  /healthz``                  — liveness probe (no upstream call)
 
 Auth
 ----
@@ -33,19 +36,22 @@ import argparse
 import asyncio
 import logging
 import os
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.concurrency import run_in_threadpool
+    from fastapi.responses import JSONResponse, Response, StreamingResponse
 except ImportError as exc:  # pragma: no cover - import-time guard
     raise ImportError(
         "blockrun-litellm[proxy] extras not installed. "
         "Run: pip install 'blockrun-litellm[proxy]'"
     ) from exc
 
+import httpx
 import json as _json
 
 from blockrun_llm.types import APIError, PaymentError
@@ -321,6 +327,212 @@ async def chat_completions(request: Request) -> Any:
             raise
 
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Native Anthropic /v1/messages passthrough (Claude Code, Anthropic SDK, ...)
+# ---------------------------------------------------------------------------
+# Claude Code (and anything built on the Anthropic SDK) speaks the Anthropic
+# Messages protocol, NOT OpenAI. Rather than translate Anthropic<->OpenAI
+# (lossy — silently drops tool_use / thinking / cache_control), we forward the
+# request VERBATIM to BlockRun's native /v1/messages endpoint and add ONLY the
+# x402 signature. tools / tool_choice / thinking / streaming pass through
+# untouched, so agentic tool use works exactly as against api.anthropic.com.
+#
+# Both chains supported: Base signs via the SDK's EIP-712 httpx transport, Solana
+# via _SolanaX402Transport (SVM). The chain is picked from the configured
+# api-url (--api-url / BLOCKRUN_API_URL).
+
+_messages_http_clients: Dict[str, httpx.Client] = {}
+
+
+class _SolanaX402Transport(httpx.BaseTransport):
+    """httpx transport that signs Solana (SVM) x402 payments on 402 — the Solana
+    twin of blockrun_llm's Base/EIP-712 ``_BlockRunX402Transport``.
+
+    Lets ANY path (here: ``/v1/messages``) stream through ``sol.blockrun.ai`` by
+    reusing the SDK's SVM signing helpers. The x402 client isn't thread-safe, so
+    the brief signing step is lock-guarded (mirrors SolanaLLMClient._sign_payment).
+    """
+
+    def __init__(self, private_key: str, api_url: str, base_transport=None):
+        # Lazy import: the x402 SVM stack only ships with blockrun-llm[solana].
+        from x402 import x402ClientSync
+        from blockrun_llm.solana_client import (
+            _create_signer,
+            _resolve_rpc_config,
+            _register_svm_with_headers,
+        )
+
+        self._api_url = api_url.rstrip("/")
+        self._base = base_transport or httpx.HTTPTransport()
+        resolved_url, resolved_headers = _resolve_rpc_config(None, None)
+        self._x402_client = x402ClientSync()
+        _register_svm_with_headers(
+            self._x402_client, _create_signer(private_key), resolved_url, resolved_headers
+        )
+        self._lock = threading.Lock()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        from blockrun_llm.solana_client import SolanaLLMClient
+        from x402.http.utils import (
+            decode_payment_required_header,
+            encode_payment_signature_header,
+        )
+
+        response = self._base.handle_request(request)
+        if response.status_code != 402:
+            return response
+
+        response.read()
+        payment_header = SolanaLLMClient._extract_payment_header(response)
+        if not payment_header:
+            return response
+
+        payment_required = decode_payment_required_header(payment_header)
+        with self._lock:
+            payload = self._x402_client.create_payment_payload(payment_required)
+        request.headers["PAYMENT-SIGNATURE"] = encode_payment_signature_header(payload)
+        return self._base.handle_request(request)
+
+    def close(self) -> None:
+        self._base.close()
+
+
+def _resolve_api_url() -> str:
+    return (os.environ.get("BLOCKRUN_API_URL") or _adapter.BASE_API_URL).rstrip("/")
+
+
+def _messages_client(api_url: str) -> httpx.Client:
+    """Cached httpx client whose transport signs x402 for any path on the chain
+    implied by ``api_url`` (Base via EIP-712, Solana via SVM)."""
+    existing = _messages_http_clients.get(api_url)
+    if existing is not None:
+        return existing
+
+    if _adapter._is_solana_url(api_url):
+        from blockrun_llm.solana_wallet import load_solana_wallet
+
+        key = os.environ.get("SOLANA_WALLET_KEY") or load_solana_wallet()
+        if not key:
+            raise HTTPException(500, "No Solana wallet configured (set SOLANA_WALLET_KEY)")
+        transport: httpx.BaseTransport = _SolanaX402Transport(private_key=key, api_url=api_url)
+    else:
+        from eth_account import Account
+        from blockrun_llm.anthropic_client import _BlockRunX402Transport
+        from blockrun_llm.wallet import load_wallet
+
+        key = os.environ.get("BLOCKRUN_WALLET_KEY") or load_wallet()
+        if not key:
+            raise HTTPException(500, "No Base wallet configured (set BLOCKRUN_WALLET_KEY)")
+        if not key.startswith("0x"):
+            key = "0x" + key
+        transport = _BlockRunX402Transport(account=Account.from_key(key), api_url=api_url)
+
+    client = httpx.Client(transport=transport, timeout=300.0)
+    _messages_http_clients[api_url] = client
+    return client
+
+
+def _anthropic_fwd_headers(request: Request) -> Dict[str, str]:
+    # Strip the client's proxy-gate auth (Authorization / x-api-key); the
+    # transport supplies its own x402 PAYMENT-SIGNATURE. Mirror AnthropicClient,
+    # which sets api_key="blockrun". Preserve the Anthropic protocol headers.
+    headers = {
+        "content-type": "application/json",
+        "x-api-key": "blockrun",
+        "anthropic-version": request.headers.get("anthropic-version", "2023-06-01"),
+    }
+    beta = request.headers.get("anthropic-beta")
+    if beta:
+        headers["anthropic-beta"] = beta
+    return headers
+
+
+def _open_upstream_stream(
+    client: httpx.Client, target: str, raw: bytes, headers: Dict[str, str]
+) -> httpx.Response:
+    """Send a streaming POST and return the response with its status known but
+    body unread. The caller owns the response and MUST close it. Opening the
+    stream up front (rather than inside the response generator) is what lets us
+    surface the real upstream status instead of an unconditional ``200``."""
+    req = client.build_request("POST", target, content=raw, headers=headers)
+    return client.send(req, stream=True)
+
+
+async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool) -> Response:
+    """Verbatim x402-signed passthrough to BlockRun's native Anthropic endpoint.
+
+    Shared by ``/v1/messages`` and ``/v1/messages/count_tokens``. The upstream
+    call is gated by ``_get_semaphore()`` (like every other paid route) so the
+    agentic Anthropic path can't stampede the gateway. For streaming we open the
+    upstream first to learn its status, then either return a real error
+    ``Response`` (preserving the 4xx/5xx the client must see) or stream the body.
+    """
+    api_url = _resolve_api_url()
+    raw = await request.body()
+    client = _messages_client(api_url)
+    headers = _anthropic_fwd_headers(request)
+    qs = request.url.query
+    target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
+
+    wants_stream = False
+    if allow_stream:
+        try:
+            wants_stream = bool(_json.loads(raw or b"{}").get("stream"))
+        except Exception:
+            wants_stream = False
+
+    if wants_stream:
+        # Hold the semaphore across the paid upstream connection (x402 probe +
+        # sign + handshake) — released before the body drain so a slow reader
+        # doesn't keep a slot. Mirrors _sse_event_stream's two-phase approach.
+        async with _get_semaphore():
+            resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+
+        if resp.status_code >= 400:
+            # A real upstream error — surface the true status + body, NOT a 200
+            # text/event-stream the Anthropic SDK would mis-parse or hang on.
+            body = await run_in_threadpool(resp.read)
+            await run_in_threadpool(resp.close)
+            return Response(
+                content=body,
+                status_code=resp.status_code,
+                media_type=resp.headers.get("content-type", "application/json"),
+            )
+
+        def _drain():
+            try:
+                for chunk in resp.iter_raw():
+                    yield chunk
+            finally:
+                resp.close()
+
+        return StreamingResponse(
+            _drain(),
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "text/event-stream"),
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def _post():
+        resp = client.post(target, content=raw, headers=headers)
+        return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
+
+    async with _get_semaphore():
+        status, ctype, content = await run_in_threadpool(_post)
+    return Response(content=content, status_code=status, media_type=ctype)
+
+
+@app.post("/v1/messages", dependencies=[Depends(_require_token)])
+async def anthropic_messages(request: Request) -> Any:
+    return await _forward_anthropic(request, "/v1/messages", allow_stream=True)
+
+
+@app.post("/v1/messages/count_tokens", dependencies=[Depends(_require_token)])
+async def anthropic_count_tokens(request: Request) -> Any:
+    # Claude Code calls this to size requests; count_tokens is never streamed.
+    return await _forward_anthropic(request, "/v1/messages/count_tokens", allow_stream=False)
 
 
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])

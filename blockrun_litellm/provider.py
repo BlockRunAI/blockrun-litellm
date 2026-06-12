@@ -199,6 +199,11 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
                 "completion_tokens": chunk.usage.completion_tokens,
                 "total_tokens": chunk.usage.total_tokens,
             }
+        # NOTE: deliberately do NOT set tool_use here. This is the post-finish
+        # usage frame; adding the key changes LiteLLM's CustomStreamWrapper
+        # post-finish guard and lets the frame survive even without
+        # provider_specific_fields, breaking the key contract that
+        # test_usage_dropped_without_provider_specific_fields_key locks in.
         return GenericStreamingChunk(
             text="",
             is_finished=False,
@@ -225,6 +230,10 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
         extras = {**(extras or {}), "reasoning_content": reasoning}
         provider_specific_fields = extras
 
+    # NB: tool calls (``delta.tool_calls``) are intentionally NOT handled here.
+    # They need to be split into separate name/arguments frames for LiteLLM's
+    # Anthropic adapter — see _iter_stream_chunks(), which wraps this function.
+
     # BlockRun's per-chunk usage is rarely populated; LiteLLM tolerates None.
     usage = None
     if chunk.usage is not None:
@@ -242,6 +251,89 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
         index=choice.index,
         provider_specific_fields=provider_specific_fields,
     )
+
+
+def _tool_use_frame(*, id, name, arguments, index):
+    """A single-object ``tool_use`` payload (bedrock-style shape).
+
+    LiteLLM's custom-provider → Anthropic /v1/messages adapter is a state
+    machine: a frame carrying a function *name* opens a ``tool_use`` content
+    block (``content_block_start``); a later frame carrying only *arguments*
+    streams them as ``input_json_delta``. It does NOT handle name+arguments in
+    one frame (the args are silently dropped → tool_use block with empty input).
+    """
+    return {
+        "text": "",
+        "is_finished": False,
+        "finish_reason": "",
+        "usage": None,
+        "index": index,
+        "provider_specific_fields": None,
+        "tool_use": {
+            "id": id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+            "index": index,
+        },
+    }
+
+
+def _iter_stream_chunks(chunk, state=None):
+    """Expand one SDK chunk into the GenericStreamingChunk(s) LiteLLM consumes.
+
+    Plain text / usage / finish chunks pass straight through. A chunk carrying
+    tool calls is SPLIT, per tool call, into a name frame (opens the Anthropic
+    ``tool_use`` block) followed by an arguments frame (streams ``input_json_
+    delta``). BlockRun's SDK delivers each tool call complete (id+name+full
+    arguments) in one chunk — the opposite of OpenAI's incremental tool
+    streaming that LiteLLM's adapter expects — so we re-shape it here. Without
+    the split, agentic clients (Claude Code via /v1/messages) get a tool_use
+    block with no input and can't act.
+
+    ``state`` is a per-stream mutable dict carrying the running tool-block index
+    counter. BlockRun's ``ToolCall`` has NO per-call ``index`` field, and a model
+    can emit several parallel tool calls (in one chunk or across several). Each
+    must land on a DISTINCT Anthropic content-block index or the adapter collapses
+    them onto one block and drops all but the last. We therefore assign a
+    stream-scoped monotonic index (0, 1, 2, …) — the 0-based tool-array position
+    LiteLLM's adapter expects. Callers must pass one fresh dict per stream.
+    """
+    if state is None:
+        state = {}
+
+    tool_calls = None
+    if chunk.choices:
+        tool_calls = getattr(chunk.choices[0].delta, "tool_calls", None)
+
+    if not tool_calls:
+        yield _to_generic_chunk(chunk)
+        return
+
+    for tc in tool_calls:
+        fn = getattr(tc, "function", None)
+        index = state.get("tool_index", 0)
+        state["tool_index"] = index + 1
+        # Frame 1 — name: opens the tool_use content block.
+        yield _tool_use_frame(
+            id=getattr(tc, "id", None),
+            name=getattr(fn, "name", None) if fn else None,
+            arguments="",
+            index=index,
+        )
+        # Frame 2 — arguments: streamed as input_json_delta. Emit even when the
+        # SDK gives no args (empty string is a harmless no-op delta).
+        yield _tool_use_frame(
+            id=None,
+            name=None,
+            arguments=(getattr(fn, "arguments", None) or "") if fn else "",
+            index=index,
+        )
+
+    # A tool-call chunk may also carry a finish_reason / usage frame alongside
+    # the calls; forward the plain conversion too so those aren't lost. (When it
+    # carries only tool calls, this is a benign empty text frame.)
+    if chunk.choices[0].finish_reason or chunk.usage is not None:
+        yield _to_generic_chunk(chunk)
 
 
 class BlockRunLLM(CustomLLM):
@@ -318,6 +410,7 @@ class BlockRunLLM(CustomLLM):
         # ``stream`` is implicit at this entrypoint; drop it so the SDK doesn't
         # see a duplicate kwarg.
         openai_kwargs.pop("stream", None)
+        stream_state: Dict[str, Any] = {}
         try:
             for chunk in _adapter.chat_completion_stream_sync(
                 model=model,
@@ -326,7 +419,8 @@ class BlockRunLLM(CustomLLM):
                 private_key=api_key,
                 **openai_kwargs,
             ):
-                yield _to_generic_chunk(chunk)
+                for gchunk in _iter_stream_chunks(chunk, stream_state):
+                    yield gchunk
         except Exception as exc:
             translated = _translate_to_litellm(exc, model)
             if translated is not None:
@@ -344,6 +438,7 @@ class BlockRunLLM(CustomLLM):
         """Async streaming. Same semantics as :meth:`streaming`."""
         openai_kwargs = _collect_openai_kwargs(kwargs)
         openai_kwargs.pop("stream", None)
+        stream_state: Dict[str, Any] = {}
         try:
             async for chunk in _adapter.chat_completion_stream_async(
                 model=model,
@@ -352,7 +447,8 @@ class BlockRunLLM(CustomLLM):
                 private_key=api_key,
                 **openai_kwargs,
             ):
-                yield _to_generic_chunk(chunk)
+                for gchunk in _iter_stream_chunks(chunk, stream_state):
+                    yield gchunk
         except Exception as exc:
             translated = _translate_to_litellm(exc, model)
             if translated is not None:

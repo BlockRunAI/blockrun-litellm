@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 — 2026-06-12
+
+### Added
+- **Native Anthropic `/v1/messages` passthrough (Base + Solana).** The sidecar
+  now exposes `POST /v1/messages` and `POST /v1/messages/count_tokens` and
+  forwards them verbatim to BlockRun's native Anthropic endpoint, adding only the
+  x402 signature — `tools` / `tool_choice` / `thinking` / streaming pass through
+  untouched. One sidecar now serves Claude Code (`/v1/messages`), Codex, and any
+  OpenAI client with no lossy Anthropic↔OpenAI translation layer. Solana signing
+  goes through a new lock-guarded `_SolanaX402Transport`.
+- **Streaming tool calls reach the Anthropic bridge with their arguments.** The
+  in-process custom provider (`litellm.completion(model="blockrun/…")`) now splits
+  each complete SDK tool call into the name/arguments frames LiteLLM's Anthropic
+  adapter expects (`_iter_stream_chunks`).
+
+### Fixed
+- **Parallel tool calls no longer collapse onto one content block.** BlockRun's
+  `ToolCall` carries no per-call `index`, so the previous `getattr(tc, "index", 0)`
+  was always `0` — every parallel tool call landed on Anthropic block index 0 and
+  all but the last were dropped (the agentic pattern Claude Code uses most). The
+  stream now assigns a stream-scoped monotonic block index, fixed across chunks.
+- **Streaming upstream errors keep their real status.** A 4xx/5xx on a streaming
+  `/v1/messages` was delivered as HTTP 200 `text/event-stream` with a non-SSE
+  error body, which the Anthropic SDK would mis-parse or hang on. The upstream is
+  now opened before headers are committed, so a genuine error returns a real error
+  `Response` with the upstream status and body.
+- **The Anthropic routes now respect the concurrency cap.** `/v1/messages` and
+  `/v1/messages/count_tokens` were the only paid routes not gated by
+  `_get_semaphore()`; under agentic load they could stampede the gateway past
+  `BLOCKRUN_MAX_CONCURRENT`. Both now hold the semaphore for the paid upstream
+  call (released before the streaming body drain), and `count_tokens` now forwards
+  the inbound query string like `/v1/messages`.
+
 ## 0.3.14 — 2026-06-11
 
 ### Fixed
