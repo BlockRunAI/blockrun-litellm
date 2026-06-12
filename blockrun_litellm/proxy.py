@@ -279,54 +279,17 @@ async def _sse_event_stream(
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_require_token)])
 async def chat_completions(request: Request) -> Any:
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
-
-    model = body.get("model")
-    messages = body.get("messages")
-    if not model or not isinstance(messages, list):
-        raise HTTPException(400, "`model` and `messages` are required")
-
-    stream = bool(body.get("stream"))
-
-    # Drop control fields before forwarding the rest as OpenAI kwargs.
-    openai_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages", "stream")}
-
-    if stream:
-        # SSE response. Errors before the first chunk (e.g. payment failure
-        # during the 402 dance) get embedded in the stream rather than as
-        # HTTP errors — easier for OpenAI-compatible clients to consume.
-        return StreamingResponse(
-            _sse_event_stream(model, messages, openai_kwargs),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",  # disable proxy buffering
-                "Connection": "keep-alive",
-            },
-        )
-
-    async with _get_semaphore():
-        try:
-            payload = await _adapter.chat_completion_async(
-                model=model,
-                messages=messages,
-                **openai_kwargs,
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-        except Exception as exc:
-            if _is_solana_rpc_exc(exc):
-                log.warning("solana rpc error: %s", _solana_rpc_msg(exc))
-                raise HTTPException(503, _solana_rpc_msg(exc))
-            raise
-
-    return payload
+    # Verbatim x402-signed passthrough to the gateway's native
+    # /v1/chat/completions. Previously this went through the SDK's typed
+    # chat_completion_stream, which crashes on streamed tool calls
+    # ('dict' object has no attribute 'delta' — the strict ToolCall schema
+    # rejects streaming argument-fragment frames, falls back to model_construct,
+    # then the archive loop reads .delta on a dict). Raw passthrough keeps every
+    # OpenAI client — including Codex with wire_api=chat — off that path, so
+    # streamed tool_calls survive intact.
+    return await _forward_passthrough(
+        request, "/v1/chat/completions", _openai_fwd_headers(request), allow_stream=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +412,12 @@ def _anthropic_fwd_headers(request: Request) -> Dict[str, str]:
     return headers
 
 
+def _openai_fwd_headers(request: Request) -> Dict[str, str]:
+    # Drop the client's proxy-gate auth; the x402 PAYMENT-SIGNATURE comes from
+    # the transport, and the gateway treats x402 as the auth (no API key needed).
+    return {"content-type": request.headers.get("content-type", "application/json")}
+
+
 def _open_upstream_stream(
     client: httpx.Client, target: str, raw: bytes, headers: Dict[str, str]
 ) -> httpx.Response:
@@ -460,19 +429,24 @@ def _open_upstream_stream(
     return client.send(req, stream=True)
 
 
-async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool) -> Response:
-    """Verbatim x402-signed passthrough to BlockRun's native Anthropic endpoint.
+async def _forward_passthrough(
+    request: Request, path: str, headers: Dict[str, str], *, allow_stream: bool
+) -> Response:
+    """Verbatim x402-signed passthrough to a BlockRun native endpoint.
 
-    Shared by ``/v1/messages`` and ``/v1/messages/count_tokens``. The upstream
-    call is gated by ``_get_semaphore()`` (like every other paid route) so the
-    agentic Anthropic path can't stampede the gateway. For streaming we open the
-    upstream first to learn its status, then either return a real error
-    ``Response`` (preserving the 4xx/5xx the client must see) or stream the body.
+    Shared by ``/v1/messages``, ``/v1/messages/count_tokens`` and
+    ``/v1/chat/completions``. The body is forwarded byte-for-byte — no
+    translation, no SDK typed parsing — so OpenAI clients (incl. Codex with
+    wire_api=chat) and Claude Code stay off the SDK's ``chat_completion_stream``
+    path, the source of the streamed-tool-call ``'dict' object has no attribute
+    'delta'`` crash. The upstream call is gated by ``_get_semaphore()`` like
+    every other paid route. For streaming we open the upstream first to learn its
+    real status, then either return a real error ``Response`` (preserving the
+    4xx/5xx the client must see) or stream the body.
     """
     api_url = _resolve_api_url()
     raw = await request.body()
     client = _messages_client(api_url)
-    headers = _anthropic_fwd_headers(request)
     qs = request.url.query
     target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
 
@@ -526,13 +500,17 @@ async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool)
 
 @app.post("/v1/messages", dependencies=[Depends(_require_token)])
 async def anthropic_messages(request: Request) -> Any:
-    return await _forward_anthropic(request, "/v1/messages", allow_stream=True)
+    return await _forward_passthrough(
+        request, "/v1/messages", _anthropic_fwd_headers(request), allow_stream=True
+    )
 
 
 @app.post("/v1/messages/count_tokens", dependencies=[Depends(_require_token)])
 async def anthropic_count_tokens(request: Request) -> Any:
     # Claude Code calls this to size requests; count_tokens is never streamed.
-    return await _forward_anthropic(request, "/v1/messages/count_tokens", allow_stream=False)
+    return await _forward_passthrough(
+        request, "/v1/messages/count_tokens", _anthropic_fwd_headers(request), allow_stream=False
+    )
 
 
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
