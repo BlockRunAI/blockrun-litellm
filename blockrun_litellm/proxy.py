@@ -449,32 +449,69 @@ def _anthropic_fwd_headers(request: Request) -> Dict[str, str]:
     return headers
 
 
-@app.post("/v1/messages", dependencies=[Depends(_require_token)])
-async def anthropic_messages(request: Request) -> Any:
+def _open_upstream_stream(
+    client: httpx.Client, target: str, raw: bytes, headers: Dict[str, str]
+) -> httpx.Response:
+    """Send a streaming POST and return the response with its status known but
+    body unread. The caller owns the response and MUST close it. Opening the
+    stream up front (rather than inside the response generator) is what lets us
+    surface the real upstream status instead of an unconditional ``200``."""
+    req = client.build_request("POST", target, content=raw, headers=headers)
+    return client.send(req, stream=True)
+
+
+async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool) -> Response:
+    """Verbatim x402-signed passthrough to BlockRun's native Anthropic endpoint.
+
+    Shared by ``/v1/messages`` and ``/v1/messages/count_tokens``. The upstream
+    call is gated by ``_get_semaphore()`` (like every other paid route) so the
+    agentic Anthropic path can't stampede the gateway. For streaming we open the
+    upstream first to learn its status, then either return a real error
+    ``Response`` (preserving the 4xx/5xx the client must see) or stream the body.
+    """
     api_url = _resolve_api_url()
     raw = await request.body()
-    try:
-        wants_stream = bool(_json.loads(raw or b"{}").get("stream"))
-    except Exception:
-        wants_stream = False
-
     client = _messages_client(api_url)
     headers = _anthropic_fwd_headers(request)
     qs = request.url.query
-    target = f"{api_url}/v1/messages" + (f"?{qs}" if qs else "")
+    target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
+
+    wants_stream = False
+    if allow_stream:
+        try:
+            wants_stream = bool(_json.loads(raw or b"{}").get("stream"))
+        except Exception:
+            wants_stream = False
 
     if wants_stream:
-        def _gen():
-            with client.stream("POST", target, content=raw, headers=headers) as resp:
-                if resp.status_code >= 400:
-                    yield resp.read()
-                    return
+        # Hold the semaphore across the paid upstream connection (x402 probe +
+        # sign + handshake) — released before the body drain so a slow reader
+        # doesn't keep a slot. Mirrors _sse_event_stream's two-phase approach.
+        async with _get_semaphore():
+            resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+
+        if resp.status_code >= 400:
+            # A real upstream error — surface the true status + body, NOT a 200
+            # text/event-stream the Anthropic SDK would mis-parse or hang on.
+            body = await run_in_threadpool(resp.read)
+            await run_in_threadpool(resp.close)
+            return Response(
+                content=body,
+                status_code=resp.status_code,
+                media_type=resp.headers.get("content-type", "application/json"),
+            )
+
+        def _drain():
+            try:
                 for chunk in resp.iter_raw():
                     yield chunk
+            finally:
+                resp.close()
 
         return StreamingResponse(
-            _gen(),
-            media_type="text/event-stream",
+            _drain(),
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "text/event-stream"),
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
@@ -482,24 +519,20 @@ async def anthropic_messages(request: Request) -> Any:
         resp = client.post(target, content=raw, headers=headers)
         return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
 
-    status, ctype, content = await run_in_threadpool(_post)
+    async with _get_semaphore():
+        status, ctype, content = await run_in_threadpool(_post)
     return Response(content=content, status_code=status, media_type=ctype)
+
+
+@app.post("/v1/messages", dependencies=[Depends(_require_token)])
+async def anthropic_messages(request: Request) -> Any:
+    return await _forward_anthropic(request, "/v1/messages", allow_stream=True)
 
 
 @app.post("/v1/messages/count_tokens", dependencies=[Depends(_require_token)])
 async def anthropic_count_tokens(request: Request) -> Any:
-    # Claude Code calls this to size requests; forward it the same way.
-    api_url = _resolve_api_url()
-    raw = await request.body()
-    client = _messages_client(api_url)
-    headers = _anthropic_fwd_headers(request)
-
-    def _post():
-        resp = client.post(f"{api_url}/v1/messages/count_tokens", content=raw, headers=headers)
-        return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
-
-    status, ctype, content = await run_in_threadpool(_post)
-    return Response(content=content, status_code=status, media_type=ctype)
+    # Claude Code calls this to size requests; count_tokens is never streamed.
+    return await _forward_anthropic(request, "/v1/messages/count_tokens", allow_stream=False)
 
 
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])

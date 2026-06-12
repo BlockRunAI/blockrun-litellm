@@ -27,8 +27,11 @@ def _delta(*, content=None, tool_calls=None, reasoning_content=None):
     return NS(content=content, tool_calls=tool_calls, reasoning_content=reasoning_content)
 
 
-def _tc(*, index=0, id=None, name=None, arguments=None):
-    return NS(index=index, id=id, type="function", function=NS(name=name, arguments=arguments))
+def _tc(*, id=None, name=None, arguments=None):
+    # Mirror production blockrun_llm.types.ToolCall: id/type/function only — NO
+    # `index` field. The stream-scoped counter in _iter_stream_chunks must assign
+    # the content-block index; it must not read one off the tool call.
+    return NS(id=id, type="function", function=NS(name=name, arguments=arguments))
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +80,34 @@ def test_tool_call_chunk_carrying_finish_also_forwards_it():
 
 
 def test_parallel_tool_calls_each_get_their_own_block():
+    # Two parallel calls in ONE chunk — the counter must give them distinct
+    # block indices even though neither ToolCall carries an `index`.
+    state = {}
     out = list(_iter_stream_chunks(_chunk(_delta(tool_calls=[
-        _tc(index=0, id="a", name="f0", arguments="{}"),
-        _tc(index=1, id="b", name="f1", arguments="{}"),
-    ]))))
+        _tc(id="a", name="f0", arguments="{}"),
+        _tc(id="b", name="f1", arguments="{}"),
+    ])), state))
     indices = [o["tool_use"]["index"] for o in out]
     assert indices == [0, 0, 1, 1]  # name+args per call, distinct block indices
+
+
+def test_parallel_tool_calls_across_chunks_get_distinct_blocks():
+    # BlockRun may deliver each parallel call in its OWN chunk. The stream-scoped
+    # state dict must keep the counter monotonic across chunks, or both collapse
+    # onto block 0 and the second call is lost.
+    state = {}
+    out0 = list(_iter_stream_chunks(_chunk(_delta(tool_calls=[_tc(id="a", name="f0", arguments="{}")])), state))
+    out1 = list(_iter_stream_chunks(_chunk(_delta(tool_calls=[_tc(id="b", name="f1", arguments="{}")])), state))
+    assert [o["tool_use"]["index"] for o in out0] == [0, 0]
+    assert [o["tool_use"]["index"] for o in out1] == [1, 1]
+
+
+def test_tool_index_does_not_leak_across_streams():
+    # A fresh state dict per stream means each stream starts its tool blocks at 0.
+    first = list(_iter_stream_chunks(_chunk(_delta(tool_calls=[_tc(id="a", name="f", arguments="{}")])), {}))
+    second = list(_iter_stream_chunks(_chunk(_delta(tool_calls=[_tc(id="b", name="g", arguments="{}")])), {}))
+    assert first[0]["tool_use"]["index"] == 0
+    assert second[0]["tool_use"]["index"] == 0
 
 
 # ---------------------------------------------------------------------------
