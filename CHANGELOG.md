@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.1 — 2026-06-14
+
+### Fixed
+- **`/v1/chat/completions` is now a verbatim x402-signed passthrough — streamed
+  tool calls no longer crash.** The endpoint previously went through the SDK's
+  typed `chat_completion_stream`, which rejects streaming tool-call
+  argument-fragment frames, falls back to `model_construct` (leaving `choices` as
+  raw dicts), then crashes in the archive loop with `'dict' object has no
+  attribute 'delta'`. It now rides the same `_forward_passthrough` helper as
+  `/v1/messages`, so every OpenAI client — including **Codex with
+  `wire_api=chat`** — keeps streamed `tool_calls` intact.
+- **A Solana RPC fault during x402 signing maps to `503`, not a bare `500`.**
+  `_forward_passthrough` (used by `/v1/chat/completions`, `/v1/messages`, and
+  `/v1/messages/count_tokens`) now catches a `SolanaRpcException` raised before
+  any upstream status exists and surfaces a clean `503`; non-Solana faults still
+  propagate. Restores the behaviour the old typed chat path had.
+- **`__version__` was stale at `0.3.14`** while `pyproject.toml` had moved to
+  `0.4.0`; the two are back in sync.
+
+### Internal
+- Generalized `_forward_anthropic` → `_forward_passthrough(headers)` and removed
+  the now-dead `_sse_event_stream` / `_openai_error_event` SDK-streaming helpers.
+- The litellm `/v1/messages` end-to-end tool-call test auto-skips when the
+  installed litellm validates the custom provider against its `LlmProviders`
+  enum (it isn't in that enum), so a plain `pytest` is green by default. Added
+  passthrough coverage for `/v1/chat/completions` and the new `503` mapping.
+
 ## 0.4.0 — 2026-06-12
 
 ### Added
