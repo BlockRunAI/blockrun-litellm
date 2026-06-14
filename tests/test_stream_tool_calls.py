@@ -120,7 +120,7 @@ def test_tool_call_reaches_anthropic_messages_with_arguments():
     import blockrun_litellm._adapter as adapter
     from blockrun_litellm.provider import register
     from blockrun_llm.types import (
-        ChatCompletionChunk, ChatChunkChoice, ChatChunkDelta, ChatUsage, ToolCall, FunctionCall,
+        ChatCompletionChunk, ChatChunkChoice, ChatChunkDelta, ChatUsage,
     )
 
     register()
@@ -133,8 +133,13 @@ def test_tool_call_reaches_anthropic_messages_with_arguments():
 
     async def fake_stream(*a, **k):
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(role="assistant"), finish_reason=None)])
+        # Build the tool call from a dict so pydantic coerces it to whichever
+        # type the installed SDK declares for ChatChunkDelta.tool_calls — the
+        # strict ToolCall (older SDK) or the lenient ChatChunkToolCall (the SDK's
+        # streamed-tool-call fix). Keeps this test green across that SDK change.
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(
-            tool_calls=[ToolCall(id="call_1", function=FunctionCall(name="list_files", arguments='{"path":"/tmp"}'))]
+            tool_calls=[{"index": 0, "id": "call_1", "type": "function",
+                         "function": {"name": "list_files", "arguments": '{"path":"/tmp"}'}}]
         ), finish_reason=None)])
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(), finish_reason="tool_calls")])
         yield _sdk_chunk([], usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
