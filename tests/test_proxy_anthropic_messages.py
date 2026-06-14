@@ -4,7 +4,7 @@ Regression guards for three bugs found in review:
 
   #2  A streaming upstream 4xx/5xx must reach the client with its REAL status —
       not as an unconditional HTTP 200 text/event-stream the Anthropic SDK would
-      mis-parse or hang on. (_forward_anthropic opens the upstream first, then
+      mis-parse or hang on. (_forward_passthrough opens the upstream first, then
       returns a real error Response when status >= 400.)
 
   #3  /v1/messages and /v1/messages/count_tokens must acquire _get_semaphore(),
@@ -172,3 +172,103 @@ def test_count_tokens_acquires_semaphore(monkeypatch, client, count_semaphore):
     assert b"42" in resp.content
     assert fake.posts == 1  # count_tokens is never streamed
     assert count_semaphore["acquired"] == 1
+
+
+# ---------------------------------------------------------------------------
+# /v1/chat/completions rides the SAME passthrough (PR #7) — verify it is wired
+# to _forward_passthrough with allow_stream=True, not the old typed SDK path.
+# ---------------------------------------------------------------------------
+
+def test_chat_completions_non_stream_passthrough(monkeypatch, client, count_semaphore):
+    ok = httpx.Response(
+        200,
+        headers={"content-type": "application/json"},
+        content=b'{"id":"chatcmpl_1","object":"chat.completion"}',
+    )
+    fake = _patch_client(monkeypatch, ok)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-5.5", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == b'{"id":"chatcmpl_1","object":"chat.completion"}'
+    assert fake.posts == 1 and fake.stream_sends == 0  # buffered (non-stream) path
+    assert count_semaphore["acquired"] == 1
+
+
+def test_chat_completions_streaming_error_preserves_status(monkeypatch, client, count_semaphore):
+    err = httpx.Response(
+        402,
+        headers={"content-type": "application/json"},
+        content=b'{"error":{"message":"insufficient funds"}}',
+    )
+    fake = _patch_client(monkeypatch, err)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-5.5", "messages": [], "stream": True},
+    )
+
+    # The real 402 reaches the OpenAI client — NOT a 200 SSE that masks the error.
+    assert resp.status_code == 402
+    assert b"insufficient funds" in resp.content
+    assert fake.stream_sends == 1  # streaming path opened the upstream first
+    assert count_semaphore["acquired"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A Solana RPC fault during x402 signing maps to 503, not a bare 500 (PR #7).
+# Applies to every passthrough route; exercised here via /v1/chat/completions.
+# ---------------------------------------------------------------------------
+
+class _RaisingClient:
+    """A signing-stage failure: post()/send() raise before any upstream status."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    def build_request(self, method, url, content=None, headers=None):
+        return httpx.Request(method, url, content=content, headers=headers)
+
+    def send(self, request, stream=False):
+        raise self._exc
+
+    def post(self, url, content=None, headers=None):
+        raise self._exc
+
+
+def test_signing_solana_rpc_error_maps_to_503(monkeypatch, client, count_semaphore):
+    boom = RuntimeError("getAccountInfo timed out")
+    monkeypatch.setattr(proxy, "_messages_client", lambda api_url: _RaisingClient(boom))
+    # Treat our sentinel as a Solana RPC fault without constructing the real
+    # (optional-dep) SolanaRpcException, whose ctor needs a live RPC context.
+    monkeypatch.setattr(proxy, "_is_solana_rpc_exc", lambda exc: exc is boom)
+    monkeypatch.setattr(proxy, "_solana_rpc_msg", lambda exc: str(exc))
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-5.5", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert resp.status_code == 503
+    assert b"getAccountInfo timed out" in resp.content
+    assert count_semaphore["acquired"] == 1
+
+
+def test_signing_non_solana_error_propagates(monkeypatch, count_semaphore):
+    # A non-Solana signing fault must NOT be silently downgraded to 503 — it
+    # propagates (FastAPI 500), same as the old typed chat path re-raised.
+    boom = RuntimeError("unexpected")
+    monkeypatch.setattr(proxy, "_messages_client", lambda api_url: _RaisingClient(boom))
+    monkeypatch.setattr(proxy, "_is_solana_rpc_exc", lambda exc: False)
+
+    # raise_server_exceptions=True (default) surfaces the original exception so we
+    # can assert it is NOT swallowed into a 503.
+    strict = TestClient(proxy.app)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        strict.post(
+            "/v1/chat/completions",
+            json={"model": "openai/gpt-5.5", "messages": [], "stream": True},
+        )

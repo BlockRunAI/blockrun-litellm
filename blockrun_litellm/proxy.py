@@ -220,8 +220,9 @@ class _SolanaX402Transport(httpx.BaseTransport):
     """httpx transport that signs Solana (SVM) x402 payments on 402 — the Solana
     twin of blockrun_llm's Base/EIP-712 ``_BlockRunX402Transport``.
 
-    Lets ANY path (here: ``/v1/messages``) stream through ``sol.blockrun.ai`` by
-    reusing the SDK's SVM signing helpers. The x402 client isn't thread-safe, so
+    Lets ANY path (``/v1/messages``, ``/v1/chat/completions``, ...) stream through
+    ``sol.blockrun.ai`` by reusing the SDK's SVM signing helpers. The x402 client
+    isn't thread-safe, so
     the brief signing step is lock-guarded (mirrors SolanaLLMClient._sign_payment).
     """
 
@@ -369,7 +370,18 @@ async def _forward_passthrough(
         # sign + handshake) — released before the body drain so a slow reader
         # reading at 1 tok/s doesn't keep a slot and block other callers.
         async with _get_semaphore():
-            resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+            try:
+                resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+            except Exception as exc:  # noqa: BLE001
+                # A Solana JSON-RPC fault during x402 signing (e.g. getAccountInfo
+                # timeout) surfaces here, BEFORE any upstream status exists. Map it
+                # to a clean 503 instead of a bare 500 — restoring the behaviour the
+                # old typed chat path had, and giving the merged Anthropic path the
+                # same treatment.
+                if _is_solana_rpc_exc(exc):
+                    log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
+                    return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
+                raise
 
         if resp.status_code >= 400:
             # A real upstream error — surface the true status + body, NOT a 200
@@ -401,7 +413,13 @@ async def _forward_passthrough(
         return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
 
     async with _get_semaphore():
-        status, ctype, content = await run_in_threadpool(_post)
+        try:
+            status, ctype, content = await run_in_threadpool(_post)
+        except Exception as exc:  # noqa: BLE001
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
+                return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
+            raise
     return Response(content=content, status_code=status, media_type=ctype)
 
 
