@@ -15,7 +15,30 @@ no input and can't act — plain chat streams fine, every tool step is empty.
 import asyncio
 from types import SimpleNamespace as NS
 
+import pytest
+
 from blockrun_litellm.provider import _iter_stream_chunks
+
+
+def _litellm_anthropic_accepts_blockrun() -> bool:
+    """Does the installed litellm's experimental /v1/messages handler accept our
+    custom provider?
+
+    ``register()`` adds ``blockrun`` to ``litellm.custom_provider_map``, but the
+    anthropic-messages handler (litellm>=~1.61) instead validates the provider
+    against the ``LlmProviders`` enum — which ``blockrun`` is not in — and raises
+    ``ValueError`` before our adapter ever runs. On those versions the end-to-end
+    translation path below cannot execute, so we skip it rather than hard-fail.
+    The unit tests above (``_iter_stream_chunks``) cover the split/index logic and
+    are unaffected.
+    """
+    import litellm
+
+    try:
+        litellm.LlmProviders("blockrun")
+        return True
+    except ValueError:
+        return False
 
 
 def _chunk(delta, *, finish_reason=None, usage=None):
@@ -115,12 +138,18 @@ def test_tool_index_does_not_leak_across_streams():
 # (Anthropic) translation with its arguments intact.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    not _litellm_anthropic_accepts_blockrun(),
+    reason="installed litellm validates the custom provider against the "
+    "LlmProviders enum in its /v1/messages handler; 'blockrun' isn't in that "
+    "enum, so this end-to-end translation path can't run on this version.",
+)
 def test_tool_call_reaches_anthropic_messages_with_arguments():
     from litellm.anthropic_interface.messages import acreate
     import blockrun_litellm._adapter as adapter
     from blockrun_litellm.provider import register
     from blockrun_llm.types import (
-        ChatCompletionChunk, ChatChunkChoice, ChatChunkDelta, ChatUsage, ToolCall, FunctionCall,
+        ChatCompletionChunk, ChatChunkChoice, ChatChunkDelta, ChatUsage,
     )
 
     register()
@@ -133,8 +162,13 @@ def test_tool_call_reaches_anthropic_messages_with_arguments():
 
     async def fake_stream(*a, **k):
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(role="assistant"), finish_reason=None)])
+        # Build the tool call from a dict so pydantic coerces it to whichever
+        # type the installed SDK declares for ChatChunkDelta.tool_calls — the
+        # strict ToolCall (older SDK) or the lenient ChatChunkToolCall (the SDK's
+        # streamed-tool-call fix). Keeps this test green across that SDK change.
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(
-            tool_calls=[ToolCall(id="call_1", function=FunctionCall(name="list_files", arguments='{"path":"/tmp"}'))]
+            tool_calls=[{"index": 0, "id": "call_1", "type": "function",
+                         "function": {"name": "list_files", "arguments": '{"path":"/tmp"}'}}]
         ), finish_reason=None)])
         yield _sdk_chunk([ChatChunkChoice(index=0, delta=ChatChunkDelta(), finish_reason="tool_calls")])
         yield _sdk_chunk([], usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15))

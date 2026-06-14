@@ -184,149 +184,19 @@ def _payment_error_sse_message(exc: PaymentError) -> str:
     return msg
 
 
-def _openai_error_event(message: str, code: int = 500) -> str:
-    """Render an error as an SSE ``data:`` line in OpenAI's error schema.
-
-    The openai Python SDK (v1.x, Rust parser) recognises ``{"error": {...}}``
-    streaming events only when the nested object uses OpenAI's exact field
-    names: ``message``, ``type``, ``param``, ``code``.  Non-conforming shapes
-    (e.g. a ``status`` key instead of ``code``) cause the Rust untagged-enum
-    parser to fail with "data did not match any variant", which LiteLLM then
-    wraps as a confusing ``MidStreamFallbackError``.
-    """
-    payload = {
-        "error": {
-            "message": message,
-            "type": "upstream_error",
-            "param": None,
-            "code": str(code),
-        }
-    }
-    return f"data: {_json.dumps(payload)}\n\n"
-
-
-async def _sse_event_stream(
-    model: str,
-    messages: List[Dict[str, Any]],
-    openai_kwargs: Dict[str, Any],
-):
-    """Async generator that renders BlockRun chunks as OpenAI SSE events.
-
-    Each chunk is emitted as ``data: <json>\\n\\n`` (OpenAI convention),
-    followed by a terminating ``data: [DONE]\\n\\n`` once the upstream
-    iterator drains. Errors during streaming are surfaced as a final
-    ``data: {"error": ...}`` event before the [DONE], since headers
-    have already been flushed.
-
-    Concurrency note: the semaphore is held only until the first chunk
-    arrives from upstream — covering the x402 probe + sign + HTTP handshake.
-    The remaining chunks stream freely without occupying a semaphore slot,
-    so a slow client reading at 1 token/s does not block 100 other callers.
-    """
-    stream_gen = _adapter.chat_completion_stream_async(
-        model=model, messages=messages, **openai_kwargs
-    )
-
-    # Phase 1: acquire semaphore, establish upstream connection, get first chunk.
-    first_chunk_data: Optional[str] = None
-    error_event: Optional[str] = None
-
-    async with _get_semaphore():
-        try:
-            first_obj = await stream_gen.__anext__()
-            first_chunk_data = f"data: {_json.dumps(first_obj.model_dump(exclude_none=True))}\n\n"
-        except StopAsyncIteration:
-            pass  # empty stream — unusual but not fatal
-        except PaymentError as exc:
-            error_event = _openai_error_event(_payment_error_sse_message(exc), code=402)
-        except APIError as exc:
-            error_event = _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
-        except Exception as exc:
-            if _is_solana_rpc_exc(exc):
-                log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
-                error_event = _openai_error_event(_solana_rpc_msg(exc), code=503)
-            else:
-                log.exception("stream error (first chunk)")
-                error_event = _openai_error_event(str(exc), code=500)
-
-    # Semaphore released — emit first chunk or error, then stream the rest.
-    if error_event:
-        yield error_event
-        yield "data: [DONE]\n\n"
-        return
-
-    if first_chunk_data:
-        yield first_chunk_data
-
-    # Phase 2: drain remaining chunks without holding the semaphore.
-    try:
-        async for chunk in stream_gen:
-            yield f"data: {_json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
-    except PaymentError as exc:
-        yield _openai_error_event(_payment_error_sse_message(exc), code=402)
-    except APIError as exc:
-        yield _openai_error_event(str(exc), code=getattr(exc, "status_code", 500) or 500)
-    except Exception as exc:
-        if _is_solana_rpc_exc(exc):
-            log.warning("solana rpc error during stream: %s", _solana_rpc_msg(exc))
-            yield _openai_error_event(_solana_rpc_msg(exc), code=503)
-        else:
-            log.exception("stream error")
-            yield _openai_error_event(str(exc), code=500)
-
-    yield "data: [DONE]\n\n"
-
-
 @app.post("/v1/chat/completions", dependencies=[Depends(_require_token)])
 async def chat_completions(request: Request) -> Any:
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
-
-    model = body.get("model")
-    messages = body.get("messages")
-    if not model or not isinstance(messages, list):
-        raise HTTPException(400, "`model` and `messages` are required")
-
-    stream = bool(body.get("stream"))
-
-    # Drop control fields before forwarding the rest as OpenAI kwargs.
-    openai_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages", "stream")}
-
-    if stream:
-        # SSE response. Errors before the first chunk (e.g. payment failure
-        # during the 402 dance) get embedded in the stream rather than as
-        # HTTP errors — easier for OpenAI-compatible clients to consume.
-        return StreamingResponse(
-            _sse_event_stream(model, messages, openai_kwargs),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",  # disable proxy buffering
-                "Connection": "keep-alive",
-            },
-        )
-
-    async with _get_semaphore():
-        try:
-            payload = await _adapter.chat_completion_async(
-                model=model,
-                messages=messages,
-                **openai_kwargs,
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-        except Exception as exc:
-            if _is_solana_rpc_exc(exc):
-                log.warning("solana rpc error: %s", _solana_rpc_msg(exc))
-                raise HTTPException(503, _solana_rpc_msg(exc))
-            raise
-
-    return payload
+    # Verbatim x402-signed passthrough to the gateway's native
+    # /v1/chat/completions. Previously this went through the SDK's typed
+    # chat_completion_stream, which crashes on streamed tool calls
+    # ('dict' object has no attribute 'delta' — the strict ToolCall schema
+    # rejects streaming argument-fragment frames, falls back to model_construct,
+    # then the archive loop reads .delta on a dict). Raw passthrough keeps every
+    # OpenAI client — including Codex with wire_api=chat — off that path, so
+    # streamed tool_calls survive intact.
+    return await _forward_passthrough(
+        request, "/v1/chat/completions", _openai_fwd_headers(request), allow_stream=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -350,8 +220,9 @@ class _SolanaX402Transport(httpx.BaseTransport):
     """httpx transport that signs Solana (SVM) x402 payments on 402 — the Solana
     twin of blockrun_llm's Base/EIP-712 ``_BlockRunX402Transport``.
 
-    Lets ANY path (here: ``/v1/messages``) stream through ``sol.blockrun.ai`` by
-    reusing the SDK's SVM signing helpers. The x402 client isn't thread-safe, so
+    Lets ANY path (``/v1/messages``, ``/v1/chat/completions``, ...) stream through
+    ``sol.blockrun.ai`` by reusing the SDK's SVM signing helpers. The x402 client
+    isn't thread-safe, so
     the brief signing step is lock-guarded (mirrors SolanaLLMClient._sign_payment).
     """
 
@@ -449,6 +320,12 @@ def _anthropic_fwd_headers(request: Request) -> Dict[str, str]:
     return headers
 
 
+def _openai_fwd_headers(request: Request) -> Dict[str, str]:
+    # Drop the client's proxy-gate auth; the x402 PAYMENT-SIGNATURE comes from
+    # the transport, and the gateway treats x402 as the auth (no API key needed).
+    return {"content-type": request.headers.get("content-type", "application/json")}
+
+
 def _open_upstream_stream(
     client: httpx.Client, target: str, raw: bytes, headers: Dict[str, str]
 ) -> httpx.Response:
@@ -460,19 +337,24 @@ def _open_upstream_stream(
     return client.send(req, stream=True)
 
 
-async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool) -> Response:
-    """Verbatim x402-signed passthrough to BlockRun's native Anthropic endpoint.
+async def _forward_passthrough(
+    request: Request, path: str, headers: Dict[str, str], *, allow_stream: bool
+) -> Response:
+    """Verbatim x402-signed passthrough to a BlockRun native endpoint.
 
-    Shared by ``/v1/messages`` and ``/v1/messages/count_tokens``. The upstream
-    call is gated by ``_get_semaphore()`` (like every other paid route) so the
-    agentic Anthropic path can't stampede the gateway. For streaming we open the
-    upstream first to learn its status, then either return a real error
-    ``Response`` (preserving the 4xx/5xx the client must see) or stream the body.
+    Shared by ``/v1/messages``, ``/v1/messages/count_tokens`` and
+    ``/v1/chat/completions``. The body is forwarded byte-for-byte — no
+    translation, no SDK typed parsing — so OpenAI clients (incl. Codex with
+    wire_api=chat) and Claude Code stay off the SDK's ``chat_completion_stream``
+    path, the source of the streamed-tool-call ``'dict' object has no attribute
+    'delta'`` crash. The upstream call is gated by ``_get_semaphore()`` like
+    every other paid route. For streaming we open the upstream first to learn its
+    real status, then either return a real error ``Response`` (preserving the
+    4xx/5xx the client must see) or stream the body.
     """
     api_url = _resolve_api_url()
     raw = await request.body()
     client = _messages_client(api_url)
-    headers = _anthropic_fwd_headers(request)
     qs = request.url.query
     target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
 
@@ -486,9 +368,20 @@ async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool)
     if wants_stream:
         # Hold the semaphore across the paid upstream connection (x402 probe +
         # sign + handshake) — released before the body drain so a slow reader
-        # doesn't keep a slot. Mirrors _sse_event_stream's two-phase approach.
+        # reading at 1 tok/s doesn't keep a slot and block other callers.
         async with _get_semaphore():
-            resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+            try:
+                resp = await run_in_threadpool(_open_upstream_stream, client, target, raw, headers)
+            except Exception as exc:  # noqa: BLE001
+                # A Solana JSON-RPC fault during x402 signing (e.g. getAccountInfo
+                # timeout) surfaces here, BEFORE any upstream status exists. Map it
+                # to a clean 503 instead of a bare 500 — restoring the behaviour the
+                # old typed chat path had, and giving the merged Anthropic path the
+                # same treatment.
+                if _is_solana_rpc_exc(exc):
+                    log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
+                    return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
+                raise
 
         if resp.status_code >= 400:
             # A real upstream error — surface the true status + body, NOT a 200
@@ -520,19 +413,29 @@ async def _forward_anthropic(request: Request, path: str, *, allow_stream: bool)
         return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
 
     async with _get_semaphore():
-        status, ctype, content = await run_in_threadpool(_post)
+        try:
+            status, ctype, content = await run_in_threadpool(_post)
+        except Exception as exc:  # noqa: BLE001
+            if _is_solana_rpc_exc(exc):
+                log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
+                return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
+            raise
     return Response(content=content, status_code=status, media_type=ctype)
 
 
 @app.post("/v1/messages", dependencies=[Depends(_require_token)])
 async def anthropic_messages(request: Request) -> Any:
-    return await _forward_anthropic(request, "/v1/messages", allow_stream=True)
+    return await _forward_passthrough(
+        request, "/v1/messages", _anthropic_fwd_headers(request), allow_stream=True
+    )
 
 
 @app.post("/v1/messages/count_tokens", dependencies=[Depends(_require_token)])
 async def anthropic_count_tokens(request: Request) -> Any:
     # Claude Code calls this to size requests; count_tokens is never streamed.
-    return await _forward_anthropic(request, "/v1/messages/count_tokens", allow_stream=False)
+    return await _forward_passthrough(
+        request, "/v1/messages/count_tokens", _anthropic_fwd_headers(request), allow_stream=False
+    )
 
 
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
