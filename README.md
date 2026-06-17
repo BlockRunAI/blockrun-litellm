@@ -10,6 +10,10 @@ LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models
 - [`CUSTOMER-ONBOARDING`](docs/CUSTOMER-ONBOARDING.md) / [`中文`](docs/CUSTOMER-ONBOARDING.zh.md) — 5-minute walkthrough, both modes
 - [`PROXY-FULL-SETUP`](docs/PROXY-FULL-SETUP.md) / [`中文`](docs/PROXY-FULL-SETUP.zh.md) — full deploy with admin UI + Postgres + troubleshooting
 
+🌐 **Hosted docs:** [**blockrun.ai/docs**](https://blockrun.ai/docs)
+- [Chat Completions API](https://blockrun.ai/docs/api-reference/chat-completions)
+- [Models & pricing](https://blockrun.ai/docs/api-reference/models)
+
 > **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. The only thing that differs is *authentication*: BlockRun uses per-request x402 wallet signatures (non-custodial USDC micropayments on Base / Solana), not a Bearer API key. This package bridges that gap.
 
 [中文文档见底部 / Chinese docs at the bottom](#中文文档)
