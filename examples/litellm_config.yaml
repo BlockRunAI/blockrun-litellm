@@ -29,9 +29,23 @@
 #
 # The values below are each provider's official LIST price (what BlockRun's
 # gateway also bills, 1:1) converted to $/token ($X per 1M ÷ 1e6). The sidecar
-# forwards the gateway's REAL upstream token counts (including prompt-cache
-# tokens), so cost = list price × actual tokens. Keep these in sync with the
-# gateway's price table; update when a model's list price changes.
+# forwards the gateway's REAL upstream token counts, so cost = list price ×
+# actual tokens. Keep these in sync with the gateway's price table; update when
+# a model's list price changes.
+#
+# ACCURACY CAVEATS — this view is for BUDGET ENFORCEMENT. The gateway-side
+# reconciliation report (blockrun-sol /api/internal/reconciliation) is the
+# EXACT cost source of truth, including prompt-cache discounts:
+#  • Prompt-cache pricing: `cache_read_input_token_cost` /
+#    `cache_creation_input_token_cost` in litellm_params are honored only on
+#    newer LiteLLM versions. On older proxies (e.g. 1.70.0) these keys are
+#    SILENTLY DROPPED and cache tokens are priced at the full
+#    `input_cost_per_token` — a CONSERVATIVE over-count of cache reads (the
+#    budget trips earlier, never later). Verify your proxy version, or rely on
+#    the reconciliation report for exact cost.
+#  • Streaming spend is exact only if the gateway emits a final usage frame in
+#    the SSE stream; otherwise LiteLLM falls back to tiktoken ESTIMATES.
+#    Non-streaming always prices off the gateway's real usage block.
 # ──────────────────────────────────────────────────────────────────────────
 
 model_list:
