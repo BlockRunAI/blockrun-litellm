@@ -15,6 +15,38 @@
 # Note: the model string takes the form `openai/<blockrun-model-id>` so LiteLLM
 # treats our proxy as a generic OpenAI-compatible endpoint and forwards the
 # inner provider prefix (e.g. "openai/", "anthropic/", "google/") verbatim.
+#
+# ──────────────────────────────────────────────────────────────────────────
+# ⚠️  COST / SPEND TRACKING — REQUIRED for budgets to mean anything
+# ──────────────────────────────────────────────────────────────────────────
+# LiteLLM computes per-call spend (and enforces team/key budgets like
+# `max_budget`) from `input_cost_per_token` × prompt_tokens +
+# `output_cost_per_token` × completion_tokens. The blockrun model ids
+# (`anthropic/claude-opus-4.8`, `openai/gpt-5.5`, …) are NOT in LiteLLM's
+# built-in `model_cost` map, so WITHOUT the explicit `*_cost_per_token` values
+# below LiteLLM prices these calls at $0 — a key/team `max_budget` (e.g. $200)
+# then NEVER trips and the dashboard under-reports spend.
+#
+# The values below are each provider's official LIST price (what BlockRun's
+# gateway also bills, 1:1) converted to $/token ($X per 1M ÷ 1e6). The sidecar
+# forwards the gateway's REAL upstream token counts, so cost = list price ×
+# actual tokens. Keep these in sync with the gateway's price table; update when
+# a model's list price changes.
+#
+# ACCURACY CAVEATS — this view is for BUDGET ENFORCEMENT. The gateway-side
+# reconciliation report (blockrun-sol /api/internal/reconciliation) is the
+# EXACT cost source of truth, including prompt-cache discounts:
+#  • Prompt-cache pricing: `cache_read_input_token_cost` /
+#    `cache_creation_input_token_cost` in litellm_params are honored only on
+#    newer LiteLLM versions. On older proxies (e.g. 1.70.0) these keys are
+#    SILENTLY DROPPED and cache tokens are priced at the full
+#    `input_cost_per_token` — a CONSERVATIVE over-count of cache reads (the
+#    budget trips earlier, never later). Verify your proxy version, or rely on
+#    the reconciliation report for exact cost.
+#  • Streaming spend is exact only if the gateway emits a final usage frame in
+#    the SSE stream; otherwise LiteLLM falls back to tiktoken ESTIMATES.
+#    Non-streaming always prices off the gateway's real usage block.
+# ──────────────────────────────────────────────────────────────────────────
 
 model_list:
   - model_name: gpt-5.5
@@ -22,33 +54,52 @@ model_list:
       model: openai/openai/gpt-5.5
       api_base: http://localhost:4001/v1
       api_key: "dummy"   # unused unless BLOCKRUN_PROXY_TOKEN is set on the sidecar
+      input_cost_per_token: 0.000005    # $5 / 1M
+      output_cost_per_token: 0.00003    # $30 / 1M
 
   - model_name: gpt-5-mini
     litellm_params:
       model: openai/openai/gpt-5-mini
       api_base: http://localhost:4001/v1
       api_key: "dummy"
+      input_cost_per_token: 0.00000025  # $0.25 / 1M
+      output_cost_per_token: 0.000002   # $2 / 1M
 
   - model_name: claude-fable-5
     litellm_params:
       model: openai/anthropic/claude-fable-5
       api_base: http://localhost:4001/v1
       api_key: "dummy"
+      # claude-fable-5 is redirected to Opus 4.8 upstream; price at Opus 4.8.
+      input_cost_per_token: 0.000005    # $5 / 1M
+      output_cost_per_token: 0.000025   # $25 / 1M
+      cache_read_input_token_cost: 0.0000005     # $0.50 / 1M (0.1x input)
+      cache_creation_input_token_cost: 0.00000625 # $6.25 / 1M (1.25x input)
 
   - model_name: claude-haiku-4-5
     litellm_params:
       model: openai/anthropic/claude-haiku-4-5
       api_base: http://localhost:4001/v1
       api_key: "dummy"
+      input_cost_per_token: 0.000001    # $1 / 1M
+      output_cost_per_token: 0.000005   # $5 / 1M
+      cache_read_input_token_cost: 0.0000001     # $0.10 / 1M
+      cache_creation_input_token_cost: 0.00000125 # $1.25 / 1M
 
   - model_name: gemini-3.1-pro
     litellm_params:
       model: openai/google/gemini-3.1-pro
       api_base: http://localhost:4001/v1
       api_key: "dummy"
+      input_cost_per_token: 0.000002    # $2 / 1M
+      output_cost_per_token: 0.000012   # $12 / 1M
 
   # Wildcard fallback — any BlockRun model id passed as the model name will be
   # forwarded as-is. Useful if your app already speaks BlockRun model names.
+  # ⚠️  Calls matched by this wildcard are NOT priced (no per-token cost), so
+  # they contribute $0 to spend/budgets. Add an explicit model_list entry with
+  # `input_cost_per_token`/`output_cost_per_token` for any model you want
+  # counted against a budget.
   - model_name: blockrun/*
     litellm_params:
       model: openai/*
@@ -61,8 +112,11 @@ litellm_settings:
   drop_params: True
 
   # Optional: surface BlockRun's per-request USDC cost on LiteLLM's metrics.
-  # (BlockRun returns x-blockrun-cost-usd in headers; LiteLLM's standard usage
-  # block doesn't carry it, but you can add a callback to capture it.)
+  # The gateway can return the exact settled price in an `x-blockrun-cost-usd`
+  # response header; a custom callback can read it and override `response_cost`
+  # for exact wallet reconciliation. The per-model `*_cost_per_token` values
+  # above already make spend/budgets accurate from real token counts, so this
+  # header path is an optional enhancement, not required for budgets to work.
 
 general_settings:
   # Bind LiteLLM Proxy here; clients talk to LiteLLM, LiteLLM talks to our sidecar.
