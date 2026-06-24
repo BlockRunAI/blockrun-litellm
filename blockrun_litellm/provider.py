@@ -149,8 +149,38 @@ def _build_response(model: str, payload: Dict[str, Any]) -> litellm.ModelRespons
     # caller-supplied id so callers see the model they actually asked for
     # (BlockRun may rewrite e.g. "openai/gpt-5.5" → bare "gpt-5.5").
     payload = dict(payload)
+    blockrun_meta = payload.pop("_blockrun", None)
     payload.pop("model", None)
-    return litellm.ModelResponse(**payload, model=model)
+    response = litellm.ModelResponse(**payload, model=model)
+    _attach_real_cost(response, blockrun_meta)
+    return response
+
+
+def _attach_real_cost(response: litellm.ModelResponse, meta: Optional[Dict[str, Any]]) -> None:
+    """Override LiteLLM's token×list-price estimate with BlockRun's real x402
+    charge, and expose the real consumption to callers.
+
+    LiteLLM reads ``_hidden_params["response_cost"]`` when present instead of
+    re-estimating from its price table, so setting it makes ``response_cost``
+    (and the proxy's spend tracking) reflect the actual wallet deduction. We
+    also stash ``blockrun_cost_usd`` / ``blockrun_settlement`` as explicit,
+    unambiguous fields so a caller can read the real spend alongside ``usage``
+    even if a future LiteLLM version reclaims ``response_cost``.
+    """
+    if not meta:
+        return
+    cost = meta.get("cost_usd")
+    if cost is None:
+        return
+    hidden = getattr(response, "_hidden_params", None)
+    if not isinstance(hidden, dict):
+        hidden = {}
+        response._hidden_params = hidden
+    cost = float(cost)
+    hidden["response_cost"] = cost
+    hidden["blockrun_cost_usd"] = cost
+    if meta.get("settlement"):
+        hidden["blockrun_settlement"] = meta["settlement"]
 
 
 def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
