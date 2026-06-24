@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.3 — 2026-06-24
+
+### Added
+- **Report the real x402 wallet charge instead of LiteLLM's estimate** (#11).
+  In-process custom-provider mode surfaces the SDK's real per-call charge
+  (`response.cost_usd`) into `_hidden_params["response_cost"]`, so LiteLLM's
+  spend / `max_budget` reflect the **actual wallet deduction** (which carries
+  the per-call floor + margin) rather than a token×list-price estimate. Also
+  exposes `blockrun_cost_usd` / `blockrun_settlement`, and the JSONL log now
+  records `cost_usd` (real when known), `cost_source`
+  (`blockrun_x402` vs `litellm_estimate`), `estimated_cost_usd`, and
+  `settlement`.
+  - Non-streaming in-process path only. Needs a `blockrun-llm` that attaches
+    `response.cost_usd` for the race-free path; otherwise falls back to a
+    best-effort (`_last_call_cost`) value. Proxy-server mode is unchanged —
+    see the per-model pricing in 0.4.2.
+
 ## 0.4.2 — 2026-06-24
 
 ### Changed
