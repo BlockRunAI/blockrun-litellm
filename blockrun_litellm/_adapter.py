@@ -192,6 +192,29 @@ def _filter_kwargs(payload: Dict[str, Any], *, is_solana: bool = False) -> Dict[
 
 
 # ---------------------------------------------------------------------------
+# Real-cost extraction
+# ---------------------------------------------------------------------------
+# LiteLLM bills off a token-count × list-price estimate, which does NOT match
+# BlockRun's real x402 charge (the gateway price carries a per-call floor +
+# margin). We surface the SDK's real charge so callers can report the actual
+# wallet deduction instead. The authoritative source is the per-call value the
+# SDK attaches to the response (``response.cost_usd``, since blockrun-llm 1.3);
+# ``client._last_call_cost`` is a best-effort fallback for older SDKs (note it
+# goes stale on free/cached calls and is racy under shared-client concurrency).
+_BLOCKRUN_META_KEY = "_blockrun"
+
+
+def _strip_real_cost(payload: Dict[str, Any], client: Any) -> Dict[str, Any]:
+    """Pop the SDK-attached cost/settlement out of the dumped payload and return
+    a ``{cost_usd, settlement}`` meta dict (cost may be ``None`` if unavailable)."""
+    cost = payload.pop("cost_usd", None)
+    settlement = payload.pop("settlement", None)
+    if cost is None:
+        cost = getattr(client, "_last_call_cost", None)
+    return {"cost_usd": cost, "settlement": settlement}
+
+
+# ---------------------------------------------------------------------------
 # Non-streaming entrypoints
 # ---------------------------------------------------------------------------
 
@@ -219,7 +242,9 @@ def chat_completion_sync(
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_sync_client(api_url=api_url, private_key=private_key)
     response = client.chat_completion(model=model, messages=messages, **kwargs)
-    return response.model_dump(exclude_none=True)
+    payload = response.model_dump(exclude_none=True)
+    payload[_BLOCKRUN_META_KEY] = _strip_real_cost(payload, client)
+    return payload
 
 
 async def chat_completion_async(
@@ -240,7 +265,9 @@ async def chat_completion_async(
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_async_client(api_url=api_url, private_key=private_key)
     response = await client.chat_completion(model=model, messages=messages, **kwargs)
-    return response.model_dump(exclude_none=True)
+    payload = response.model_dump(exclude_none=True)
+    payload[_BLOCKRUN_META_KEY] = _strip_real_cost(payload, client)
+    return payload
 
 
 # ---------------------------------------------------------------------------

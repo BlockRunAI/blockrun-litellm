@@ -44,7 +44,16 @@ Each JSONL line is one row with these fields:
                      populated when the upstream returns usage; ``None`` otherwise
     latency_ms     — wall-clock duration of the call
     stream         — bool: True if the caller asked for streaming
-    cost_usd       — per-call cost if LiteLLM computed one (``None`` for free models)
+    cost_usd       — real x402 wallet charge for this call when known
+                     (``cost_source == "blockrun_x402"``); otherwise LiteLLM's
+                     token×list-price estimate. ``0.0`` for free models,
+                     ``None`` on failure.
+    cost_source    — "blockrun_x402" (real on-chain charge) or
+                     "litellm_estimate" (fallback token×list-price guess)
+    estimated_cost_usd — LiteLLM's token×list-price estimate, always recorded
+                     alongside so the estimate vs real gap is auditable
+    settlement     — decoded on-chain receipt {tx_hash, amount_micro_usdc,
+                     network, ...} when the gateway returned one; else ``None``
     status         — "success" or "failure"
     error_type     — class name (failure only)
     error_message  — exception ``str`` (failure only)
@@ -127,12 +136,17 @@ def _extract_completion(response_obj: Any) -> Optional[str]:
         return None
 
 
+def _hidden_params(response_obj: Any) -> Optional[Dict[str, Any]]:
+    hp = getattr(response_obj, "_hidden_params", None)
+    if hp is None and isinstance(response_obj, dict):
+        hp = response_obj.get("_hidden_params")
+    return hp if isinstance(hp, dict) else None
+
+
 def _extract_cost(response_obj: Any, kwargs: Dict[str, Any]) -> Optional[float]:
     """LiteLLM stuffs a computed cost in a few possible places."""
     try:
-        hp = getattr(response_obj, "_hidden_params", None)
-        if hp is None and isinstance(response_obj, dict):
-            hp = response_obj.get("_hidden_params")
+        hp = _hidden_params(response_obj)
         if hp:
             c = hp.get("response_cost")
             if c is not None:
@@ -141,6 +155,26 @@ def _extract_cost(response_obj: Any, kwargs: Dict[str, Any]) -> Optional[float]:
         pass
     c = kwargs.get("response_cost") if isinstance(kwargs, dict) else None
     return float(c) if c is not None else None
+
+
+def _extract_real_cost(response_obj: Any) -> Dict[str, Any]:
+    """Pull BlockRun's real x402 charge + settlement off the response.
+
+    Returns ``{"cost_usd": <real|None>, "settlement": <dict|None>}``. When a
+    real charge is present we record it as the authoritative ``cost_usd`` and
+    tag ``cost_source="blockrun_x402"``; otherwise the row falls back to
+    LiteLLM's token×list-price estimate (``cost_source="litellm_estimate"``).
+    """
+    try:
+        hp = _hidden_params(response_obj)
+        if hp and hp.get("blockrun_cost_usd") is not None:
+            return {
+                "cost_usd": float(hp["blockrun_cost_usd"]),
+                "settlement": hp.get("blockrun_settlement"),
+            }
+    except Exception:
+        pass
+    return {"cost_usd": None, "settlement": None}
 
 
 def _latency_ms(start_time: Any, end_time: Any) -> Optional[float]:
@@ -203,6 +237,9 @@ def _build_entry(
             "completion": None,
             "usage": None,
             "cost_usd": None,
+            "cost_source": None,
+            "estimated_cost_usd": None,
+            "settlement": None,
             "error_type": type(failure).__name__,
             "error_message": str(failure),
         })
@@ -215,11 +252,24 @@ def _build_entry(
     # those intermediate rows.
     if stream and usage is None and not completion:
         return None
+    estimate = _extract_cost(response_obj, kwargs)
+    real = _extract_real_cost(response_obj)
+    if real["cost_usd"] is not None:
+        cost_usd = real["cost_usd"]
+        cost_source = "blockrun_x402"
+    else:
+        cost_usd = estimate
+        cost_source = "litellm_estimate"
     entry.update({
         "status": "success",
         "completion": completion,
         "usage": usage,
-        "cost_usd": _extract_cost(response_obj, kwargs),
+        # Real wallet deduction when known (x402), else LiteLLM's estimate.
+        "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        # Keep LiteLLM's token×list-price estimate alongside for comparison.
+        "estimated_cost_usd": estimate,
+        "settlement": real["settlement"],
     })
     return entry
 
