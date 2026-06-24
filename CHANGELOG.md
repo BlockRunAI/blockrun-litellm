@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4 — 2026-06-24
+
+### Changed
+- **Require `blockrun-llm>=1.4.6`** — guarantees the SDK attaches the real
+  per-call x402 charge to `ChatResponse` (`cost_usd` / `settlement`, race-free).
+  The exact-cost reporting added in 0.4.3 now uses the authoritative on-chain
+  charge rather than the best-effort `_last_call_cost` fallback.
+
 ## 0.4.3 — 2026-06-24
 
 ### Added
