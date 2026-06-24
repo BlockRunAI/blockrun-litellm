@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2 — 2026-06-24
+
+### Changed
+- **Require `blockrun-llm>=1.4.1`** (#8) so `pip install -U blockrun-litellm`
+  pulls the SDK fix.
+
+### Docs / examples
+- **Example LiteLLM proxy config now sets per-model pricing**
+  (`input_cost_per_token` / `output_cost_per_token`, plus cache costs for Claude)
+  so team/key budgets (e.g. a `$200` cap) actually enforce — without these the
+  proxy prices blockrun model ids at `$0` and the cap never trips. Documents the
+  requirement, the unpriced `blockrun/*` wildcard hole, and the cache/streaming
+  accuracy caveats; points at the gateway reconciliation report as the exact
+  cost source of truth (#10).
+- README links back to blockrun.ai/docs (#9).
+
 ## 0.4.1 — 2026-06-14
 
 ### Fixed
