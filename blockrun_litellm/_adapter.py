@@ -69,6 +69,14 @@ def _is_solana_url(api_url: Optional[str]) -> bool:
 # don't re-create wallets for every request. The chain is part of the key
 # so a Base call and a Solana call don't collide.
 
+# Default chat HTTP timeout (seconds) for the SDK clients the adapter builds.
+# The SDK default was 120s — too low for reasoning models (opus-4.8 /
+# deepseek-v4-pro routinely take 200–300s). Passed explicitly so the adapter
+# doesn't depend on the installed SDK version's default. Override via
+# BLOCKRUN_CHAT_TIMEOUT. NB: for streaming this is a per-chunk read timeout;
+# for non-stream it's the whole-call timeout.
+_CHAT_TIMEOUT = float(os.environ.get("BLOCKRUN_CHAT_TIMEOUT", "600"))
+
 _sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}
 _image_clients: Dict[str, Any] = {}  # ImageClient (Base) or SolanaLLMClient (Solana)
@@ -117,9 +125,12 @@ def get_sync_client(
                 client = SolanaLLMClient(
                     private_key=private_key,
                     api_url=api_url or SOLANA_API_URL,
+                    timeout=_CHAT_TIMEOUT,
                 )
             else:
-                client = LLMClient(private_key=private_key, api_url=api_url)
+                client = LLMClient(
+                    private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT
+                )
             _sync_clients[key] = client
         return client
 
@@ -148,9 +159,12 @@ def get_async_client(
                 client = AsyncSolanaLLMClient(
                     private_key=private_key,
                     api_url=api_url or SOLANA_API_URL,
+                    timeout=_CHAT_TIMEOUT,
                 )
             else:
-                client = AsyncLLMClient(private_key=private_key, api_url=api_url)
+                client = AsyncLLMClient(
+                    private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT
+                )
             _async_clients[key] = client
         return client
 
@@ -176,6 +190,11 @@ _FORWARDED_KWARGS = {
     "search",
     "search_parameters",
     "fallback_models",
+    # Reasoning controls — the gateway forwards these to the upstream model
+    # (e.g. Anthropic extended thinking). Without them in the whitelist they
+    # were silently dropped, so callers could never trigger thinking via litellm.
+    "reasoning_effort",
+    "thinking",
 }
 
 
