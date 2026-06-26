@@ -274,6 +274,52 @@ def _build_entry(
     return entry
 
 
+def log_proxy_call(
+    *,
+    model: Optional[str],
+    path: str,
+    stream: bool,
+    http_status: Optional[int],
+    cost_usd: Optional[float],
+    settlement: Optional[Dict[str, Any]],
+    latency_ms: Optional[float],
+    request_id: Optional[str] = None,
+) -> None:
+    """Append a JSONL audit row for a raw FastAPI sidecar passthrough call.
+
+    The sidecar relays bytes and has no LiteLLM callback to ride, so this is the
+    audit hook for ``/v1/chat/completions`` + ``/v1/messages``. **Opt-in** via
+    ``BLOCKRUN_LITELLM_LOG`` — unset means the sidecar never touches disk (no
+    surprise writes to ``~/.blockrun``). ``cost_usd`` is the real x402 charge
+    decoded from the gateway's ``X-PAYMENT-RESPONSE`` header (``None`` for free /
+    cached calls); the row mirrors the custom-provider schema with a
+    ``mode='proxy_passthrough'`` marker so both sources coexist in one file.
+    """
+    if not os.environ.get("BLOCKRUN_LITELLM_LOG"):
+        return
+    try:
+        now = time.time()
+        entry = {
+            "ts": now,
+            "iso": _iso(now),
+            "model": model,
+            "provider": "blockrun",
+            "mode": "proxy_passthrough",
+            "path": path,
+            "stream": bool(stream),
+            "latency_ms": latency_ms,
+            "status": "success" if (http_status or 0) < 400 else "failure",
+            "http_status": http_status,
+            "cost_usd": cost_usd,
+            "cost_source": "blockrun_x402" if cost_usd is not None else None,
+            "settlement": settlement,
+            "request_id": request_id,
+        }
+        _write_entry(_resolve_path(), entry)
+    except Exception:  # pragma: no cover - logging never breaks the proxy
+        pass
+
+
 # ---------------------------------------------------------------------------
 # CustomLogger implementation
 # ---------------------------------------------------------------------------

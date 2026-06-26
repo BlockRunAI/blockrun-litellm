@@ -55,8 +55,10 @@ import httpx
 import json as _json
 
 from blockrun_llm.types import APIError, PaymentError
+from blockrun_llm.tx_log import decode_settlement_header
 
 from blockrun_litellm import _adapter
+from blockrun_litellm import logger as _logger
 
 # Optional — present when blockrun-llm[solana] is installed alongside solana-py.
 # SolanaRpcException wraps httpx / network errors from the Solana JSON-RPC layer
@@ -342,6 +344,51 @@ def _open_upstream_stream(
     return client.send(req, stream=True)
 
 
+def _proxy_cost_from_headers(
+    headers: Any,
+) -> Tuple[Optional[float], Optional[Dict[str, Any]]]:
+    """Decode the real on-chain charge from the gateway's ``X-PAYMENT-RESPONSE``
+    response header.
+
+    This header is set per-response on the paid call, so the charge is read
+    race-free (no shared-transport correlation) and is available on the upstream
+    response before the stream body is drained. Returns ``(None, None)`` for free
+    / cached calls (no header) — graceful, like the older-SDK estimate fallback.
+    """
+    raw = headers.get("x-payment-response") or headers.get("X-PAYMENT-RESPONSE")
+    settlement = decode_settlement_header(raw)
+    if not settlement:
+        return None, None
+    amount = settlement.get("amount_micro_usdc")
+    cost: Optional[float] = None
+    if amount is not None:
+        try:
+            cost = float(amount) / 1e6
+        except (TypeError, ValueError):
+            cost = None
+    return cost, settlement
+
+
+def _cost_response_headers(
+    cost: Optional[float], settlement: Optional[Dict[str, Any]]
+) -> Dict[str, str]:
+    """Client-visible headers carrying the real wallet charge for this call, so
+    an agent / downstream proxy can track spend per request."""
+    out: Dict[str, str] = {}
+    if cost is not None:
+        out["x-blockrun-cost-usd"] = format(cost, ".10g")
+    if settlement:
+        out["x-blockrun-settlement"] = _json.dumps(settlement, default=str)
+    return out
+
+
+def _body_model(raw: bytes) -> Optional[str]:
+    try:
+        return _json.loads(raw or b"{}").get("model")
+    except Exception:
+        return None
+
+
 async def _forward_passthrough(
     request: Request, path: str, headers: Dict[str, str], *, allow_stream: bool
 ) -> Response:
@@ -362,6 +409,13 @@ async def _forward_passthrough(
     client = _messages_client(api_url)
     qs = request.url.query
     target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
+
+    _t0 = time.monotonic()
+    model = _body_model(raw)
+    req_id = request.headers.get("x-request-id")
+
+    def _latency_ms() -> float:
+        return (time.monotonic() - _t0) * 1000.0
 
     wants_stream = False
     if allow_stream:
@@ -388,16 +442,31 @@ async def _forward_passthrough(
                     return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
                 raise
 
+        # The real x402 charge rides on the upstream response's X-PAYMENT-RESPONSE
+        # header — readable now, before we drain the body.
+        cost, settlement = _proxy_cost_from_headers(resp.headers)
+
         if resp.status_code >= 400:
             # A real upstream error — surface the true status + body, NOT a 200
             # text/event-stream the Anthropic SDK would mis-parse or hang on.
             body = await run_in_threadpool(resp.read)
             await run_in_threadpool(resp.close)
+            _logger.log_proxy_call(
+                model=model, path=path, stream=True, http_status=resp.status_code,
+                cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+                request_id=req_id,
+            )
             return Response(
                 content=body,
                 status_code=resp.status_code,
                 media_type=resp.headers.get("content-type", "application/json"),
             )
+
+        _logger.log_proxy_call(
+            model=model, path=path, stream=True, http_status=resp.status_code,
+            cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+            request_id=req_id,
+        )
 
         def _drain():
             try:
@@ -406,26 +475,45 @@ async def _forward_passthrough(
             finally:
                 resp.close()
 
+        stream_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        stream_headers.update(_cost_response_headers(cost, settlement))
         return StreamingResponse(
             _drain(),
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "text/event-stream"),
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers=stream_headers,
         )
 
     def _post():
         resp = client.post(target, content=raw, headers=headers)
-        return resp.status_code, resp.headers.get("content-type", "application/json"), resp.content
+        cost, settlement = _proxy_cost_from_headers(resp.headers)
+        return (
+            resp.status_code,
+            resp.headers.get("content-type", "application/json"),
+            resp.content,
+            cost,
+            settlement,
+        )
 
     async with _get_semaphore():
         try:
-            status, ctype, content = await run_in_threadpool(_post)
+            status, ctype, content, cost, settlement = await run_in_threadpool(_post)
         except Exception as exc:  # noqa: BLE001
             if _is_solana_rpc_exc(exc):
                 log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
                 return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
             raise
-    return Response(content=content, status_code=status, media_type=ctype)
+    _logger.log_proxy_call(
+        model=model, path=path, stream=False, http_status=status,
+        cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+        request_id=req_id,
+    )
+    return Response(
+        content=content,
+        status_code=status,
+        media_type=ctype,
+        headers=_cost_response_headers(cost, settlement),
+    )
 
 
 @app.post("/v1/messages", dependencies=[Depends(_require_token)])

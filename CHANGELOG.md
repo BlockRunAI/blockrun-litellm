@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.7 — 2026-06-26
+
+### Added
+- **Real x402 cost on the FastAPI sidecar passthrough** (#12, proxy half — closes
+  #12). The raw `/v1/chat/completions` + `/v1/messages` passthrough relayed bytes
+  and surfaced no cost. It now decodes the gateway's `X-PAYMENT-RESPONSE` header
+  (the real on-chain charge) on the upstream response and:
+  - adds `x-blockrun-cost-usd` + `x-blockrun-settlement` **response headers** so a
+    calling agent / downstream proxy can track real spend per request (streaming
+    and non-streaming), and
+  - writes an **opt-in JSONL audit row** (`logger.log_proxy_call`, gated on
+    `BLOCKRUN_LITELLM_LOG`, `mode='proxy_passthrough'`, `cost_source='blockrun_x402'`)
+    mirroring the custom-provider schema.
+
+  Race-free: the charge is read from the per-response header, not a shared signing
+  transport. Free / cached calls (no header) surface no cost — graceful. The
+  passthrough body is forwarded byte-for-byte, unchanged.
+
 ## 0.4.6 — 2026-06-26
 
 ### Added
