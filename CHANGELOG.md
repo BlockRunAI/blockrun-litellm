@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.5 — 2026-06-26
+
+### Added
+- **Forward `thinking` / `reasoning_effort` through the custom provider** (#13).
+  These were silently dropped by the kwarg whitelist, so callers could never
+  trigger Anthropic extended thinking (or OpenAI reasoning effort) via the
+  LiteLLM custom provider. The gateway forwards them to the upstream model.
+
+### Changed
+- **Raise the chat HTTP timeout to 600s** (#13), overridable via
+  `BLOCKRUN_CHAT_TIMEOUT`. The SDK default of 120s was too low for reasoning
+  models (opus-4.8 / deepseek routinely take 200–300s+); non-stream calls timed
+  out mid-generation while the gateway kept billing server-side. Applied to all
+  four SDK chat clients (sync/async × Base/Solana) **and** the proxy-server
+  `/v1/chat/completions` + `/v1/messages` passthrough (previously a hardcoded
+  300s) — the latter is the heavy agentic / Claude Code path.
+
+### Fixed
+- A malformed `BLOCKRUN_CHAT_TIMEOUT` (e.g. `"600s"`) no longer crashes
+  `_adapter` import; it falls back to the 600s default, mirroring
+  `BLOCKRUN_SOLANA_IMAGE_TIMEOUT`.
+
 ## 0.4.4 — 2026-06-24
 
 ### Changed
