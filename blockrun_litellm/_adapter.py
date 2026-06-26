@@ -75,7 +75,26 @@ def _is_solana_url(api_url: Optional[str]) -> bool:
 # doesn't depend on the installed SDK version's default. Override via
 # BLOCKRUN_CHAT_TIMEOUT. NB: for streaming this is a per-chunk read timeout;
 # for non-stream it's the whole-call timeout.
-_CHAT_TIMEOUT = float(os.environ.get("BLOCKRUN_CHAT_TIMEOUT", "600"))
+_DEFAULT_CHAT_TIMEOUT_S = 600.0
+
+
+def _chat_timeout() -> float:
+    """Resolve the chat timeout, falling back on a malformed env var.
+
+    Mirrors :func:`_solana_image_timeout` — a non-numeric BLOCKRUN_CHAT_TIMEOUT
+    (e.g. ``"600s"``) must NOT crash module import, which would take down both
+    the provider and the proxy that import this module.
+    """
+    raw = os.environ.get("BLOCKRUN_CHAT_TIMEOUT")
+    if not raw:
+        return _DEFAULT_CHAT_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_CHAT_TIMEOUT_S
+
+
+_CHAT_TIMEOUT = _chat_timeout()
 
 _sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}

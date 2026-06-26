@@ -300,7 +300,12 @@ def _messages_client(api_url: str) -> httpx.Client:
             key = "0x" + key
         transport = _BlockRunX402Transport(account=Account.from_key(key), api_url=api_url)
 
-    client = httpx.Client(transport=transport, timeout=300.0)
+    # Same baseline as the SDK chat clients (BLOCKRUN_CHAT_TIMEOUT, default
+    # 600s). This passthrough is the heavy path for agentic/Claude Code traffic
+    # (/v1/messages), which is exactly where reasoning models (opus-4.8 extended
+    # thinking, 200–300s+) would otherwise time out mid-generation at the old
+    # hardcoded 300s while the gateway kept billing server-side.
+    client = httpx.Client(transport=transport, timeout=_adapter._CHAT_TIMEOUT)
     _messages_http_clients[api_url] = client
     return client
 
