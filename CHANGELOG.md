@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.6 — 2026-06-26
+
+### Added
+- **Real x402 cost on streaming calls** (#12, streaming half). The provider now
+  threads the SDK's per-call charge (`ChatCompletionChunk.cost_usd`, blockrun-llm
+  >=1.4.7) onto the **assembled** streamed response's `_hidden_params`, so:
+  - LiteLLM's `response_cost` (spend / `max_budget`) reflects the real wallet
+    deduction — set via `additional_headers['llm_provider-x-litellm-response-cost']`,
+    the only channel that survives LiteLLM's stream aggregation (which drops
+    cache fields and never recomputes a provider charge), and
+  - the JSONL audit records `blockrun_cost_usd` / `cost_source='blockrun_x402'`
+    on streamed rows, matching the non-stream path.
+
+  Race-free: the charge rides on the per-call chunk, not the shared
+  `client._last_call_cost`. Free/cached streams report `0.0`; an older SDK
+  without `cost_usd` falls back to LiteLLM's estimate.
+
+### Changed
+- **Require `blockrun-llm>=1.4.7`** for the streamed `ChatCompletionChunk.cost_usd`.
+
+### Not yet covered
+- Proxy-server mode (`/v1/chat/completions` + `/v1/messages` raw passthrough)
+  still bills off config pricing, not the real charge — tracked in #12 (proxy
+  half). The passthrough bypasses the SDK's cost path entirely.
+
 ## 0.4.5 — 2026-06-26
 
 ### Added

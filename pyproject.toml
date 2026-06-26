@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.4.5"
+version = "0.4.6"
 description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
 readme = "README.md"
 license = "MIT"
@@ -28,16 +28,18 @@ classifiers = [
 dependencies = [
     # >=1.4.6: ChatResponse.cost_usd / settlement (#11, #12) — lets the provider
     # report the REAL x402 wallet charge (race-free), not a token×list-price
-    # estimate (see 0.4.3). Also carries the earlier >=1.4.1 streamed-tool-call
-    # parse fix and the Solana ~/.blockrun/.solana-session auto-load.
-    "blockrun-llm>=1.4.6",
+    # estimate (see 0.4.3). >=1.4.7 also attaches the real charge to streamed
+    # chunks (ChatCompletionChunk.cost_usd) so streaming reports real cost too.
+    # Also carries the earlier >=1.4.1 streamed-tool-call parse fix and the
+    # Solana ~/.blockrun/.solana-session auto-load.
+    "blockrun-llm>=1.4.7",
     "litellm>=1.40.0",
 ]
 
 [project.optional-dependencies]
 # Re-exported here so `pip install 'blockrun-litellm[solana]'` pulls the
 # x402 SVM toolchain that SolanaLLMClient needs (x402 SDK + solders).
-solana = ["blockrun-llm[solana]>=1.4.6"]
+solana = ["blockrun-llm[solana]>=1.4.7"]
 proxy = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",

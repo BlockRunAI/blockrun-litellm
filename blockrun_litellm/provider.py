@@ -183,6 +183,54 @@ def _attach_real_cost(response: litellm.ModelResponse, meta: Optional[Dict[str, 
         hidden["blockrun_settlement"] = meta["settlement"]
 
 
+# Header key LiteLLM's streaming cost path reads off the assembled response's
+# ``_hidden_params`` (``get_response_cost_from_hidden_params``) when deciding
+# ``response_cost``. Setting it makes streamed spend reflect the real x402
+# charge instead of a token×list-price estimate.
+_COST_HEADER = "llm_provider-x-litellm-response-cost"
+
+
+def _cost_hidden_params(cost_usd: float) -> Dict[str, Any]:
+    """The ``_hidden_params`` payload that carries the real x402 charge through
+    LiteLLM's stream aggregation.
+
+    Why ``_hidden_params`` and not a plain field: ``stream_chunk_builder``
+    copies a chunk's ``_hidden_params`` onto the assembled response verbatim
+    (``update_model_response_with_hidden_params``) but drops arbitrary
+    ``provider_specific_fields`` and never recomputes a provider charge. So the
+    real cost only survives aggregation if it rides inside ``_hidden_params``.
+
+    Two consumers read it off the assembled response:
+      * ``additional_headers[_COST_HEADER]`` → LiteLLM's ``response_cost`` (spend
+        / ``max_budget``), and
+      * ``blockrun_cost_usd`` → our JSONL audit (``cost_source='blockrun_x402'``).
+    Mirrors :func:`_attach_real_cost` on the non-streaming path.
+    """
+    cost = float(cost_usd)
+    return {
+        "response_cost": cost,
+        "blockrun_cost_usd": cost,
+        "additional_headers": {_COST_HEADER: cost},
+    }
+
+
+def _inject_real_cost(gchunk: Dict[str, Any], cost_usd: float) -> None:
+    """Thread the real x402 charge onto a ``GenericStreamingChunk`` in place.
+
+    LiteLLM's custom-provider stream handler ``setattr``s every
+    ``provider_specific_fields`` key onto the per-chunk ``ModelResponseStream``
+    — so stashing ``_hidden_params`` there lands the cost in the chunk's
+    ``_hidden_params``, which ``stream_chunk_builder`` then copies onto the
+    assembled response. Existing fields (native fingerprint, reasoning_content)
+    are preserved.
+    """
+    psf = gchunk.get("provider_specific_fields") or {}
+    gchunk["provider_specific_fields"] = {
+        **psf,
+        "_hidden_params": _cost_hidden_params(cost_usd),
+    }
+
+
 def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
     """Collect the upstream-native fingerprint fields carried on a stream
     chunk (e.g. ``system_fingerprint``, ``service_tier``) so they survive
@@ -195,6 +243,11 @@ def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
     in-process LiteLLM streaming callers can still read the genuine signals.
     """
     extras: Dict[str, Any] = dict(chunk.model_extra or {})
+    # The SDK attaches the per-call x402 charge as ``chunk.cost_usd`` (extra),
+    # which lands in ``model_extra``. It is surfaced deliberately through
+    # ``_inject_real_cost`` (-> _hidden_params), so drop it here to avoid
+    # leaking a stray ``cost_usd`` field into ``provider_specific_fields``.
+    extras.pop("cost_usd", None)
     if chunk.usage is not None:
         usage_extra = chunk.usage.model_extra or {}
         if usage_extra:
@@ -449,7 +502,13 @@ class BlockRunLLM(CustomLLM):
                 private_key=api_key,
                 **openai_kwargs,
             ):
+                # Per-call x402 charge the SDK attaches to each chunk (race-free,
+                # vs the shared client._last_call_cost). ``None`` on older SDKs
+                # that don't attach it -> estimate fallback, no injection.
+                cost = getattr(chunk, "cost_usd", None)
                 for gchunk in _iter_stream_chunks(chunk, stream_state):
+                    if cost is not None:
+                        _inject_real_cost(gchunk, cost)
                     yield gchunk
         except Exception as exc:
             translated = _translate_to_litellm(exc, model)
@@ -477,7 +536,10 @@ class BlockRunLLM(CustomLLM):
                 private_key=api_key,
                 **openai_kwargs,
             ):
+                cost = getattr(chunk, "cost_usd", None)
                 for gchunk in _iter_stream_chunks(chunk, stream_state):
+                    if cost is not None:
+                        _inject_real_cost(gchunk, cost)
                     yield gchunk
         except Exception as exc:
             translated = _translate_to_litellm(exc, model)
