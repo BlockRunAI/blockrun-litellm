@@ -96,7 +96,7 @@ def _chat_timeout() -> float:
 
 _CHAT_TIMEOUT = _chat_timeout()
 
-_sync_clients: Dict[str, Any] = {}    # may be LLMClient or SolanaLLMClient
+_sync_clients: Dict[str, Any] = {}  # may be LLMClient or SolanaLLMClient
 _async_clients: Dict[str, AsyncLLMClient] = {}
 _image_clients: Dict[str, Any] = {}  # ImageClient (Base) or SolanaLLMClient (Solana)
 _lock = threading.Lock()
@@ -104,8 +104,8 @@ _lock = threading.Lock()
 # Bounded thread pool for image generation (ImageClient is sync-only).
 # Capped at 20 so that high-concurrency image requests don't spawn unlimited
 # threads and exhaust memory. Matches the default BLOCKRUN_MAX_CONCURRENT.
-_image_executor: concurrent.futures.ThreadPoolExecutor = (
-    concurrent.futures.ThreadPoolExecutor(max_workers=20)
+_image_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=20
 )
 
 
@@ -147,9 +147,7 @@ def get_sync_client(
                     timeout=_CHAT_TIMEOUT,
                 )
             else:
-                client = LLMClient(
-                    private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT
-                )
+                client = LLMClient(private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT)
             _sync_clients[key] = client
         return client
 
@@ -353,9 +351,7 @@ async def chat_completion_stream_async(
     is_solana = _is_solana_url(api_url)
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_async_client(api_url=api_url, private_key=private_key)
-    async for chunk in client.chat_completion_stream(
-        model=model, messages=messages, **kwargs
-    ):
+    async for chunk in client.chat_completion_stream(model=model, messages=messages, **kwargs):
         yield chunk
 
 
@@ -484,14 +480,42 @@ async def image_generation_async(
 # On Base each medium has its own SDK client (VideoClient/MusicClient/
 # SpeechClient). On Solana every medium is a method on the one SolanaLLMClient
 # (which get_image_client already builds + caches). All of these clients are
-# sync-only, so async callers run them in the shared _image_executor thread
-# pool — same pattern as image_generation_async.
+# sync-only, so async callers run them in a thread pool. Fast media (speech,
+# sound-effects) share _image_executor with images; long-running media (video
+# 60-900s, music 60-210s) get their own smaller pool so a burst of video jobs
+# can't pin all 20 image/speech threads for 15 minutes.
 
 _media_clients: Dict[str, Any] = {}
 
+_LONG_MEDIA_THREADS: int = int(os.environ.get("BLOCKRUN_LONG_MEDIA_THREADS", "8"))
+_long_media_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_LONG_MEDIA_THREADS
+)
 
-def _get_base_media_client(base_cls: Any, api_url: Optional[str], private_key: Optional[str]) -> Any:
-    """Cache + return a Base dedicated media client (VideoClient/MusicClient/…)."""
+# Server-side wall-clock ceilings. budget_seconds/timeout arrive from the
+# request body, so without a clamp a caller could pin a worker thread for a
+# day. The video cap matches the SDK's DEFAULT_GENERATE_BUDGET_SECONDS; the
+# await ceilings add margin over the longest legitimate SDK call so the
+# coroutine (and its semaphore permit) is always released even if the SDK
+# thread wedges. NB: wait_for can't kill the worker thread — it only frees
+# the awaiting coroutine; the orphaned thread exits when the SDK call does.
+_VIDEO_BUDGET_CAP_S = 900.0
+_VIDEO_AWAIT_CEILING_S = _VIDEO_BUDGET_CAP_S + 120.0
+_MUSIC_AWAIT_CEILING_S = 300.0  # MusicClient DEFAULT_TIMEOUT 210s + margin
+_SPEECH_AWAIT_CEILING_S = 150.0  # SpeechClient DEFAULT_TIMEOUT 120s + margin
+
+# Lazy imports keep module import working on SDK versions predating a client.
+_BASE_MEDIA_CLASSES = {"video": "VideoClient", "music": "MusicClient", "speech": "SpeechClient"}
+
+
+def _get_media_client(medium: str, api_url: Optional[str], private_key: Optional[str]) -> Any:
+    """Dedicated Base client for ``medium``, or the unified SolanaLLMClient
+    (which get_image_client already builds + caches) when the URL is Solana."""
+    if _is_solana_url(api_url):
+        return get_image_client(api_url=api_url, private_key=private_key)
+    import blockrun_llm
+
+    base_cls = getattr(blockrun_llm, _BASE_MEDIA_CLASSES[medium])
     key = f"{base_cls.__name__}::{_client_key(api_url, private_key)}"
     with _lock:
         client = _media_clients.get(key)
@@ -505,38 +529,72 @@ def _is_solana_client(client: Any) -> bool:
     return _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient)
 
 
+def _solana_media_method(client: Any, method: str) -> Any:
+    """Resolve a Solana media method, failing with a clear 501 instead of an
+    AttributeError-500 when the installed blockrun-llm predates Solana media
+    support (SolanaLLMClient.video/music/speech/sound_effect)."""
+    fn = getattr(client, method, None)
+    if fn is None:
+        raise APIError(
+            f"Solana {method} generation requires a blockrun-llm release with "
+            f"SolanaLLMClient.{method} support. Upgrade: pip install -U 'blockrun-llm[solana]'",
+            501,
+        )
+    return fn
+
+
 def get_video_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
     """VideoClient (Base) or the unified SolanaLLMClient (Solana)."""
-    if _is_solana_url(api_url):
-        return get_image_client(api_url=api_url, private_key=private_key)
-    from blockrun_llm import VideoClient
-
-    return _get_base_media_client(VideoClient, api_url, private_key)
+    return _get_media_client("video", api_url, private_key)
 
 
 def get_music_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
     """MusicClient (Base) or the unified SolanaLLMClient (Solana)."""
-    if _is_solana_url(api_url):
-        return get_image_client(api_url=api_url, private_key=private_key)
-    from blockrun_llm import MusicClient
-
-    return _get_base_media_client(MusicClient, api_url, private_key)
+    return _get_media_client("music", api_url, private_key)
 
 
 def get_speech_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
     """SpeechClient (Base) or the unified SolanaLLMClient (Solana). Serves both
     TTS (speech) and sound-effects."""
-    if _is_solana_url(api_url):
-        return get_image_client(api_url=api_url, private_key=private_key)
-    from blockrun_llm import SpeechClient
-
-    return _get_base_media_client(SpeechClient, api_url, private_key)
+    return _get_media_client("speech", api_url, private_key)
 
 
-def _run_media(func: Any) -> Any:
-    """Run a sync SDK media call in the shared executor."""
-    loop = asyncio.get_event_loop()
-    return loop.run_in_executor(_image_executor, func)
+async def _run_media(
+    func: Any,
+    *,
+    executor: concurrent.futures.ThreadPoolExecutor = _image_executor,
+    ceiling: float = _SPEECH_AWAIT_CEILING_S,
+) -> Any:
+    """Run a sync SDK media call in a worker thread, bounded by ``ceiling``."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(executor, func), timeout=ceiling)
+    except asyncio.TimeoutError:
+        raise APIError(
+            f"media generation exceeded the {ceiling:.0f}s server ceiling and the "
+            "request was abandoned; the background job may still complete (and "
+            "settle payment) — check your wallet history before retrying",
+            504,
+        )
+
+
+# Accepted /v1/videos/generations body params, forwarded to the SDK when
+# present. Single source of truth — proxy.py imports this.
+VIDEO_PARAM_KEYS = (
+    "image_url",
+    "last_frame_url",
+    "reference_image_urls",
+    "real_face_asset_id",
+    "duration_seconds",
+    "aspect_ratio",
+    "resolution",
+    "generate_audio",
+    "seed",
+    "watermark",
+    "return_last_frame",
+    "budget_seconds",
+    "timeout",
+)
 
 
 async def video_generation_async(
@@ -547,17 +605,30 @@ async def video_generation_async(
     private_key: Optional[str] = None,
     **params: Any,
 ) -> Dict[str, Any]:
-    """Generate a video. Extra kwargs (image_url, duration_seconds, resolution,
-    aspect_ratio, generate_audio, seed, reference_image_urls, real_face_asset_id,
-    last_frame_url, watermark, return_last_frame, budget_seconds) forward to the
-    SDK. ``timeout`` is only honored on Solana (Base VideoClient has no such arg)."""
+    """Generate a video. Extra kwargs (see :data:`VIDEO_PARAM_KEYS`) forward to
+    the SDK. ``timeout`` is only honored on Solana (Base VideoClient has no such
+    arg). Client-supplied ``budget_seconds``/``timeout`` are clamped to the
+    server cap so a request body can't pin a worker thread indefinitely; a
+    malformed (non-numeric) value raises ValueError → HTTP 400 at the proxy."""
     client = get_video_client(api_url=api_url, private_key=private_key)
     params = {k: v for k, v in params.items() if v is not None}
+    for knob in ("budget_seconds", "timeout"):
+        if knob in params:
+            params[knob] = min(float(params[knob]), _VIDEO_BUDGET_CAP_S)
     if _is_solana_client(client):
-        response = await _run_media(lambda: client.video(prompt, model=model, **params))
+        video = _solana_media_method(client, "video")
+        response = await _run_media(
+            lambda: video(prompt, model=model, **params),
+            executor=_long_media_executor,
+            ceiling=_VIDEO_AWAIT_CEILING_S,
+        )
     else:
         params.pop("timeout", None)  # Base VideoClient.generate has no timeout kwarg
-        response = await _run_media(lambda: client.generate(prompt, model=model, **params))
+        response = await _run_media(
+            lambda: client.generate(prompt, model=model, **params),
+            executor=_long_media_executor,
+            ceiling=_VIDEO_AWAIT_CEILING_S,
+        )
     return response.model_dump(exclude_none=True)
 
 
@@ -570,16 +641,18 @@ async def music_generation_async(
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Generate a music track."""
+    """Generate a music track. Raises ValueError (→ HTTP 400 at the proxy) when
+    ``lyrics`` is combined with ``instrumental=True`` — the SDK rejects that."""
     client = get_music_client(api_url=api_url, private_key=private_key)
-    call = (
-        (lambda: client.music(prompt, model=model, instrumental=instrumental, lyrics=lyrics))
-        if _is_solana_client(client)
-        else (
-            lambda: client.generate(prompt, model=model, instrumental=instrumental, lyrics=lyrics)
-        )
+    # Same call shape on both chains; only the method name differs.
+    media_fn = (
+        _solana_media_method(client, "music") if _is_solana_client(client) else client.generate
     )
-    response = await _run_media(call)
+    response = await _run_media(
+        lambda: media_fn(prompt, model=model, instrumental=instrumental, lyrics=lyrics),
+        executor=_long_media_executor,
+        ceiling=_MUSIC_AWAIT_CEILING_S,
+    )
     return response.model_dump(exclude_none=True)
 
 
@@ -597,12 +670,10 @@ async def speech_generation_async(
     client = get_speech_client(api_url=api_url, private_key=private_key)
     kw = {"model": model, "voice": voice, "response_format": response_format, "speed": speed}
     kw = {k: v for k, v in kw.items() if v is not None}
-    call = (
-        (lambda: client.speech(input, **kw))
-        if _is_solana_client(client)
-        else (lambda: client.generate(input, **kw))
+    media_fn = (
+        _solana_media_method(client, "speech") if _is_solana_client(client) else client.generate
     )
-    response = await _run_media(call)
+    response = await _run_media(lambda: media_fn(input, **kw), ceiling=_SPEECH_AWAIT_CEILING_S)
     return response.model_dump(exclude_none=True)
 
 
@@ -625,8 +696,13 @@ async def sound_effect_async(
         "response_format": response_format,
     }
     kw = {k: v for k, v in kw.items() if v is not None}
-    # Both SolanaLLMClient and SpeechClient expose .sound_effect with the same shape.
-    response = await _run_media(lambda: client.sound_effect(text, **kw))
+    # Both SolanaLLMClient and SpeechClient expose .sound_effect with the same
+    # shape; the guard only matters on SDK versions predating Solana media.
+    if _is_solana_client(client):
+        sound_effect = _solana_media_method(client, "sound_effect")
+    else:
+        sound_effect = client.sound_effect
+    response = await _run_media(lambda: sound_effect(text, **kw), ceiling=_SPEECH_AWAIT_CEILING_S)
     return response.model_dump(exclude_none=True)
 
 
@@ -643,6 +719,7 @@ __all__ = [
     "get_video_client",
     "get_music_client",
     "get_speech_client",
+    "VIDEO_PARAM_KEYS",
     "video_generation_async",
     "music_generation_async",
     "speech_generation_async",

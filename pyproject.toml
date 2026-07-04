@@ -39,6 +39,9 @@ dependencies = [
 [project.optional-dependencies]
 # Re-exported here so `pip install 'blockrun-litellm[solana]'` pulls the
 # x402 SVM toolchain that SolanaLLMClient needs (x402 SDK + solders).
+# NB: Solana *media* (SolanaLLMClient.video/music/speech/sound_effect) needs the
+# blockrun-llm release carrying BlockRunAI/blockrun-llm#16 — bump this floor when
+# it ships. Until then the adapter degrades those calls to a clear 501, not a 500.
 solana = ["blockrun-llm[solana]>=1.4.7"]
 proxy = [
     "fastapi>=0.110.0",
