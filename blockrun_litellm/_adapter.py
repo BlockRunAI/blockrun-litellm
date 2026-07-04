@@ -478,6 +478,158 @@ async def image_generation_async(
     return response.model_dump(exclude_none=True)
 
 
+# ---------------------------------------------------------------------------
+# Video / music / speech generation (Base dedicated clients vs Solana unified)
+# ---------------------------------------------------------------------------
+# On Base each medium has its own SDK client (VideoClient/MusicClient/
+# SpeechClient). On Solana every medium is a method on the one SolanaLLMClient
+# (which get_image_client already builds + caches). All of these clients are
+# sync-only, so async callers run them in the shared _image_executor thread
+# pool — same pattern as image_generation_async.
+
+_media_clients: Dict[str, Any] = {}
+
+
+def _get_base_media_client(base_cls: Any, api_url: Optional[str], private_key: Optional[str]) -> Any:
+    """Cache + return a Base dedicated media client (VideoClient/MusicClient/…)."""
+    key = f"{base_cls.__name__}::{_client_key(api_url, private_key)}"
+    with _lock:
+        client = _media_clients.get(key)
+        if client is None:
+            client = base_cls(private_key=private_key, api_url=api_url)
+            _media_clients[key] = client
+        return client
+
+
+def _is_solana_client(client: Any) -> bool:
+    return _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient)
+
+
+def get_video_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
+    """VideoClient (Base) or the unified SolanaLLMClient (Solana)."""
+    if _is_solana_url(api_url):
+        return get_image_client(api_url=api_url, private_key=private_key)
+    from blockrun_llm import VideoClient
+
+    return _get_base_media_client(VideoClient, api_url, private_key)
+
+
+def get_music_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
+    """MusicClient (Base) or the unified SolanaLLMClient (Solana)."""
+    if _is_solana_url(api_url):
+        return get_image_client(api_url=api_url, private_key=private_key)
+    from blockrun_llm import MusicClient
+
+    return _get_base_media_client(MusicClient, api_url, private_key)
+
+
+def get_speech_client(api_url: Optional[str] = None, private_key: Optional[str] = None) -> Any:
+    """SpeechClient (Base) or the unified SolanaLLMClient (Solana). Serves both
+    TTS (speech) and sound-effects."""
+    if _is_solana_url(api_url):
+        return get_image_client(api_url=api_url, private_key=private_key)
+    from blockrun_llm import SpeechClient
+
+    return _get_base_media_client(SpeechClient, api_url, private_key)
+
+
+def _run_media(func: Any) -> Any:
+    """Run a sync SDK media call in the shared executor."""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(_image_executor, func)
+
+
+async def video_generation_async(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+    **params: Any,
+) -> Dict[str, Any]:
+    """Generate a video. Extra kwargs (image_url, duration_seconds, resolution,
+    aspect_ratio, generate_audio, seed, reference_image_urls, real_face_asset_id,
+    last_frame_url, watermark, return_last_frame, budget_seconds) forward to the
+    SDK. ``timeout`` is only honored on Solana (Base VideoClient has no such arg)."""
+    client = get_video_client(api_url=api_url, private_key=private_key)
+    params = {k: v for k, v in params.items() if v is not None}
+    if _is_solana_client(client):
+        response = await _run_media(lambda: client.video(prompt, model=model, **params))
+    else:
+        params.pop("timeout", None)  # Base VideoClient.generate has no timeout kwarg
+        response = await _run_media(lambda: client.generate(prompt, model=model, **params))
+    return response.model_dump(exclude_none=True)
+
+
+async def music_generation_async(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    instrumental: bool = True,
+    lyrics: Optional[str] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a music track."""
+    client = get_music_client(api_url=api_url, private_key=private_key)
+    call = (
+        (lambda: client.music(prompt, model=model, instrumental=instrumental, lyrics=lyrics))
+        if _is_solana_client(client)
+        else (
+            lambda: client.generate(prompt, model=model, instrumental=instrumental, lyrics=lyrics)
+        )
+    )
+    response = await _run_media(call)
+    return response.model_dump(exclude_none=True)
+
+
+async def speech_generation_async(
+    input: str,
+    *,
+    model: Optional[str] = None,
+    voice: Optional[str] = None,
+    response_format: Optional[str] = None,
+    speed: Optional[float] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Synthesize speech (TTS)."""
+    client = get_speech_client(api_url=api_url, private_key=private_key)
+    kw = {"model": model, "voice": voice, "response_format": response_format, "speed": speed}
+    kw = {k: v for k, v in kw.items() if v is not None}
+    call = (
+        (lambda: client.speech(input, **kw))
+        if _is_solana_client(client)
+        else (lambda: client.generate(input, **kw))
+    )
+    response = await _run_media(call)
+    return response.model_dump(exclude_none=True)
+
+
+async def sound_effect_async(
+    text: str,
+    *,
+    model: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    prompt_influence: Optional[float] = None,
+    response_format: Optional[str] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a cinematic sound effect."""
+    client = get_speech_client(api_url=api_url, private_key=private_key)
+    kw = {
+        "model": model,
+        "duration_seconds": duration_seconds,
+        "prompt_influence": prompt_influence,
+        "response_format": response_format,
+    }
+    kw = {k: v for k, v in kw.items() if v is not None}
+    # Both SolanaLLMClient and SpeechClient expose .sound_effect with the same shape.
+    response = await _run_media(lambda: client.sound_effect(text, **kw))
+    return response.model_dump(exclude_none=True)
+
+
 __all__ = [
     "chat_completion_sync",
     "chat_completion_async",
@@ -488,6 +640,13 @@ __all__ = [
     "get_image_client",
     "image_generation_sync",
     "image_generation_async",
+    "get_video_client",
+    "get_music_client",
+    "get_speech_client",
+    "video_generation_async",
+    "music_generation_async",
+    "speech_generation_async",
+    "sound_effect_async",
     "APIError",
     "PaymentError",
 ]

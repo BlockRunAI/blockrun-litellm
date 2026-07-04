@@ -12,6 +12,11 @@ Endpoints
   Anthropic SDK); verbatim x402-signed passthrough — tools/thinking preserved
 - ``POST /v1/messages/count_tokens`` — Anthropic token counting (passthrough)
 - ``POST /v1/images/generations``    — OpenAI Image Generations (DALL-E compatible)
+- ``POST /v1/videos/generations``    — video generation (xai/grok-imagine-video,
+  Seedance); async submit+poll, settles only on completion
+- ``POST /v1/audio/speech``          — OpenAI-compatible TTS (ElevenLabs voices)
+- ``POST /v1/audio/generations``     — music generation (minimax/music-2.5+)
+- ``POST /v1/audio/sound-effects``   — cinematic sound effects
 - ``GET  /v1/models``                — passthrough to BlockRun's chat catalog
 - ``GET  /healthz``                  — liveness probe (no upstream call)
 
@@ -553,6 +558,152 @@ async def image_generations(request: Request) -> Any:
                 model=model,
                 size=size,
                 n=n,
+            )
+        except PaymentError as exc:
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+
+    return result
+
+
+# Optional video params forwarded verbatim to the SDK when present.
+_VIDEO_PARAM_KEYS = (
+    "image_url",
+    "last_frame_url",
+    "reference_image_urls",
+    "real_face_asset_id",
+    "duration_seconds",
+    "aspect_ratio",
+    "resolution",
+    "generate_audio",
+    "seed",
+    "watermark",
+    "return_last_frame",
+    "budget_seconds",
+    "timeout",
+)
+
+
+@app.post("/v1/videos/generations", dependencies=[Depends(_require_token)])
+async def video_generations(request: Request) -> Any:
+    """Generate a video (default model xai/grok-imagine-video). Submits an
+    async job and blocks until the clip is ready (typ. 60-180s); the SDK
+    polls and only settles on completion, so a timeout costs nothing."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    prompt = body.get("prompt")
+    if not prompt:
+        raise HTTPException(400, "`prompt` is required")
+
+    params = {k: body[k] for k in _VIDEO_PARAM_KEYS if body.get(k) is not None}
+
+    async with _get_semaphore():
+        try:
+            result = await _adapter.video_generation_async(
+                prompt=prompt,
+                model=body.get("model"),
+                **params,
+            )
+        except ValueError as exc:
+            # e.g. mutually-exclusive image_url + real_face_asset_id
+            raise HTTPException(400, str(exc))
+        except PaymentError as exc:
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+
+    return result
+
+
+@app.post("/v1/audio/speech", dependencies=[Depends(_require_token)])
+async def audio_speech(request: Request) -> Any:
+    """Synthesize speech (OpenAI-compatible TTS). Accepts ``input`` (or
+    ``prompt``/``text``), ``model``, ``voice``, ``response_format``, ``speed``."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    text = body.get("input") or body.get("prompt") or body.get("text")
+    if not text:
+        raise HTTPException(400, "`input` is required")
+
+    async with _get_semaphore():
+        try:
+            result = await _adapter.speech_generation_async(
+                input=text,
+                model=body.get("model"),
+                voice=body.get("voice"),
+                response_format=body.get("response_format"),
+                speed=body.get("speed"),
+            )
+        except PaymentError as exc:
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+
+    return result
+
+
+@app.post("/v1/audio/generations", dependencies=[Depends(_require_token)])
+async def audio_generations(request: Request) -> Any:
+    """Generate a music track (default model minimax/music-2.5+). Takes 1-3
+    min; returns a CDN URL valid ~24h."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    prompt = body.get("prompt")
+    if not prompt:
+        raise HTTPException(400, "`prompt` is required")
+
+    async with _get_semaphore():
+        try:
+            result = await _adapter.music_generation_async(
+                prompt=prompt,
+                model=body.get("model"),
+                instrumental=body.get("instrumental", True),
+                lyrics=body.get("lyrics"),
+            )
+        except PaymentError as exc:
+            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            return JSONResponse(status_code=status, content={"error": str(exc)})
+
+    return result
+
+
+@app.post("/v1/audio/sound-effects", dependencies=[Depends(_require_token)])
+async def audio_sound_effects(request: Request) -> Any:
+    """Generate a cinematic sound effect (default elevenlabs/sound-effects).
+    Accepts ``text`` (or ``prompt``), ``duration_seconds``, ``prompt_influence``,
+    ``response_format``."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    text = body.get("text") or body.get("prompt")
+    if not text:
+        raise HTTPException(400, "`text` is required")
+
+    async with _get_semaphore():
+        try:
+            result = await _adapter.sound_effect_async(
+                text=text,
+                model=body.get("model"),
+                duration_seconds=body.get("duration_seconds"),
+                prompt_influence=body.get("prompt_influence"),
+                response_format=body.get("response_format"),
             )
         except PaymentError as exc:
             return JSONResponse(status_code=402, content=_payment_error_payload(exc))
