@@ -17,6 +17,8 @@ Endpoints
 - ``POST /v1/audio/speech``          — OpenAI-compatible TTS (ElevenLabs voices)
 - ``POST /v1/audio/generations``     — music generation (minimax/music-2.5+)
 - ``POST /v1/audio/sound-effects``   — cinematic sound effects
+- ``POST /v1/responses``             — OpenAI Responses API bridge (translated
+  to Chat Completions)
 - ``GET  /v1/models``                — passthrough to BlockRun's chat catalog
 - ``GET  /healthz``                  — liveness probe (no upstream call)
 
@@ -52,8 +54,7 @@ try:
     from fastapi.responses import JSONResponse, Response, StreamingResponse
 except ImportError as exc:  # pragma: no cover - import-time guard
     raise ImportError(
-        "blockrun-litellm[proxy] extras not installed. "
-        "Run: pip install 'blockrun-litellm[proxy]'"
+        "blockrun-litellm[proxy] extras not installed. Run: pip install 'blockrun-litellm[proxy]'"
     ) from exc
 
 import httpx
@@ -96,6 +97,23 @@ def _get_semaphore() -> asyncio.Semaphore:
         return _concurrency_sem
 
 
+# Media routes (image/video/audio) get their own, smaller admission gate so a
+# burst of slow video jobs (60-900s each, sync SDK on a bounded thread pool)
+# can only queue up other media — never chat/messages traffic, which keeps
+# using the global semaphore above. Override with BLOCKRUN_MEDIA_MAX_CONCURRENT.
+_MEDIA_MAX_CONCURRENT: int = int(os.environ.get("BLOCKRUN_MEDIA_MAX_CONCURRENT", "20"))
+_media_sem: asyncio.Semaphore
+
+
+def _get_media_semaphore() -> asyncio.Semaphore:
+    global _media_sem
+    try:
+        return _media_sem
+    except NameError:
+        _media_sem = asyncio.Semaphore(_MEDIA_MAX_CONCURRENT)
+        return _media_sem
+
+
 app = FastAPI(
     title="blockrun-litellm proxy",
     description="OpenAI-compatible front-end for BlockRun's x402 gateway.",
@@ -107,6 +125,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 # Optional shared-secret auth
 # ---------------------------------------------------------------------------
+
 
 def _expected_token() -> Optional[str]:
     return os.environ.get("BLOCKRUN_PROXY_TOKEN") or None
@@ -457,8 +476,13 @@ async def _forward_passthrough(
             body = await run_in_threadpool(resp.read)
             await run_in_threadpool(resp.close)
             _logger.log_proxy_call(
-                model=model, path=path, stream=True, http_status=resp.status_code,
-                cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+                model=model,
+                path=path,
+                stream=True,
+                http_status=resp.status_code,
+                cost_usd=cost,
+                settlement=settlement,
+                latency_ms=_latency_ms(),
                 request_id=req_id,
             )
             return Response(
@@ -468,8 +492,13 @@ async def _forward_passthrough(
             )
 
         _logger.log_proxy_call(
-            model=model, path=path, stream=True, http_status=resp.status_code,
-            cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+            model=model,
+            path=path,
+            stream=True,
+            http_status=resp.status_code,
+            cost_usd=cost,
+            settlement=settlement,
+            latency_ms=_latency_ms(),
             request_id=req_id,
         )
 
@@ -509,8 +538,13 @@ async def _forward_passthrough(
                 return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
             raise
     _logger.log_proxy_call(
-        model=model, path=path, stream=False, http_status=status,
-        cost_usd=cost, settlement=settlement, latency_ms=_latency_ms(),
+        model=model,
+        path=path,
+        stream=False,
+        http_status=status,
+        cost_usd=cost,
+        settlement=settlement,
+        latency_ms=_latency_ms(),
         request_id=req_id,
     )
     return Response(
@@ -536,182 +570,190 @@ async def anthropic_count_tokens(request: Request) -> Any:
     )
 
 
-@app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
-async def image_generations(request: Request) -> Any:
+# ---------------------------------------------------------------------------
+# Media endpoints (image / video / speech / music / sound-effects)
+# ---------------------------------------------------------------------------
+
+
+async def _json_body(request: Request) -> Dict[str, Any]:
     try:
-        body = await request.json()
+        return await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON body")
+
+
+def _media_settlement(result: Any) -> Optional[Dict[str, Any]]:
+    """Media SDK responses carry the x402 tx hash in-body (``txHash``) rather
+    than via the X-PAYMENT-RESPONSE header; normalise to the settlement shape
+    :func:`decode_settlement_header` produces so audit rows stay uniform."""
+    if isinstance(result, dict) and result.get("txHash"):
+        return {"tx_hash": result["txHash"]}
+    return None
+
+
+async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
+    """Shared admission gate + error mapping + audit logging for media routes.
+
+    ``call`` is a zero-arg coroutine factory invoking the adapter. Maps
+    ValueError → 400 (SDK request validation, e.g. lyrics + instrumental),
+    PaymentError → 402 with gateway details, APIError → its status (502 when
+    out of range). Every settled outcome is logged via log_proxy_call — media
+    calls are the priciest per-request traffic, so they must show up in spend
+    reconciliation. The SDK doesn't expose the wallet charge for media yet
+    (cost_usd=None); the settlement tx hash from the response body is logged
+    and surfaced via the x-blockrun-settlement header.
+    """
+    _t0 = time.monotonic()
+    req_id = uuid.uuid4().hex
+    result: Optional[Dict[str, Any]] = None
+    async with _get_media_semaphore():
+        try:
+            result = await call()
+            status, payload = 200, result
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except PaymentError as exc:
+            status, payload = 402, _payment_error_payload(exc)
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            payload = {"error": str(exc)}
+    settlement = _media_settlement(result)
+    _logger.log_proxy_call(
+        model=model,
+        path=path,
+        stream=False,
+        http_status=status,
+        cost_usd=None,
+        settlement=settlement,
+        latency_ms=(time.monotonic() - _t0) * 1000.0,
+        request_id=req_id,
+    )
+    return JSONResponse(
+        status_code=status,
+        content=payload,
+        headers=_cost_response_headers(None, settlement),
+    )
+
+
+@app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
+async def image_generations(request: Request) -> Any:
+    body = await _json_body(request)
 
     prompt = body.get("prompt")
     if not prompt:
         raise HTTPException(400, "`prompt` is required")
 
+    try:
+        n: int = int(body.get("n", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "`n` must be an integer")
+
     model: Optional[str] = body.get("model")
-    size: Optional[str] = body.get("size")
-    n: int = int(body.get("n", 1))
-
-    async with _get_semaphore():
-        try:
-            result = await _adapter.image_generation_async(
-                prompt=prompt,
-                model=model,
-                size=size,
-                n=n,
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    return result
-
-
-# Optional video params forwarded verbatim to the SDK when present.
-_VIDEO_PARAM_KEYS = (
-    "image_url",
-    "last_frame_url",
-    "reference_image_urls",
-    "real_face_asset_id",
-    "duration_seconds",
-    "aspect_ratio",
-    "resolution",
-    "generate_audio",
-    "seed",
-    "watermark",
-    "return_last_frame",
-    "budget_seconds",
-    "timeout",
-)
+    return await _media_endpoint(
+        "/v1/images/generations",
+        model,
+        lambda: _adapter.image_generation_async(
+            prompt=prompt,
+            model=model,
+            size=body.get("size"),
+            n=n,
+        ),
+    )
 
 
 @app.post("/v1/videos/generations", dependencies=[Depends(_require_token)])
 async def video_generations(request: Request) -> Any:
-    """Generate a video (default model xai/grok-imagine-video). Submits an
-    async job and blocks until the clip is ready (typ. 60-180s); the SDK
-    polls and only settles on completion, so a timeout costs nothing."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
+    """Generate a video (gateway default model, e.g. xai/grok-imagine-video).
+    Submits an async job and blocks until the clip is ready (typ. 60-180s); the
+    SDK polls and only settles on completion. Optional params: see
+    ``_adapter.VIDEO_PARAM_KEYS``; ``budget_seconds``/``timeout`` are clamped
+    server-side."""
+    body = await _json_body(request)
 
     prompt = body.get("prompt")
     if not prompt:
         raise HTTPException(400, "`prompt` is required")
 
-    params = {k: body[k] for k in _VIDEO_PARAM_KEYS if body.get(k) is not None}
-
-    async with _get_semaphore():
-        try:
-            result = await _adapter.video_generation_async(
-                prompt=prompt,
-                model=body.get("model"),
-                **params,
-            )
-        except ValueError as exc:
-            # e.g. mutually-exclusive image_url + real_face_asset_id
-            raise HTTPException(400, str(exc))
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    return result
+    params = {k: body[k] for k in _adapter.VIDEO_PARAM_KEYS if body.get(k) is not None}
+    model: Optional[str] = body.get("model")
+    return await _media_endpoint(
+        "/v1/videos/generations",
+        model,
+        lambda: _adapter.video_generation_async(prompt=prompt, model=model, **params),
+    )
 
 
 @app.post("/v1/audio/speech", dependencies=[Depends(_require_token)])
 async def audio_speech(request: Request) -> Any:
     """Synthesize speech (OpenAI-compatible TTS). Accepts ``input`` (or
     ``prompt``/``text``), ``model``, ``voice``, ``response_format``, ``speed``."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
+    body = await _json_body(request)
 
     text = body.get("input") or body.get("prompt") or body.get("text")
     if not text:
         raise HTTPException(400, "`input` is required")
 
-    async with _get_semaphore():
-        try:
-            result = await _adapter.speech_generation_async(
-                input=text,
-                model=body.get("model"),
-                voice=body.get("voice"),
-                response_format=body.get("response_format"),
-                speed=body.get("speed"),
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    return result
+    model: Optional[str] = body.get("model")
+    return await _media_endpoint(
+        "/v1/audio/speech",
+        model,
+        lambda: _adapter.speech_generation_async(
+            input=text,
+            model=model,
+            voice=body.get("voice"),
+            response_format=body.get("response_format"),
+            speed=body.get("speed"),
+        ),
+    )
 
 
 @app.post("/v1/audio/generations", dependencies=[Depends(_require_token)])
 async def audio_generations(request: Request) -> Any:
-    """Generate a music track (default model minimax/music-2.5+). Takes 1-3
-    min; returns a CDN URL valid ~24h."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
+    """Generate a music track (gateway default model). Takes 1-3 min; returns
+    a CDN URL valid ~24h. ``lyrics`` requires ``instrumental: false`` — the
+    SDK rejects the combination with a 400."""
+    body = await _json_body(request)
 
     prompt = body.get("prompt")
     if not prompt:
         raise HTTPException(400, "`prompt` is required")
 
-    async with _get_semaphore():
-        try:
-            result = await _adapter.music_generation_async(
-                prompt=prompt,
-                model=body.get("model"),
-                instrumental=body.get("instrumental", True),
-                lyrics=body.get("lyrics"),
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    return result
+    model: Optional[str] = body.get("model")
+    return await _media_endpoint(
+        "/v1/audio/generations",
+        model,
+        lambda: _adapter.music_generation_async(
+            prompt=prompt,
+            model=model,
+            instrumental=body.get("instrumental", True),
+            lyrics=body.get("lyrics"),
+        ),
+    )
 
 
 @app.post("/v1/audio/sound-effects", dependencies=[Depends(_require_token)])
 async def audio_sound_effects(request: Request) -> Any:
-    """Generate a cinematic sound effect (default elevenlabs/sound-effects).
-    Accepts ``text`` (or ``prompt``), ``duration_seconds``, ``prompt_influence``,
+    """Generate a cinematic sound effect (gateway default model). Accepts
+    ``text`` (or ``prompt``), ``duration_seconds``, ``prompt_influence``,
     ``response_format``."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
+    body = await _json_body(request)
 
     text = body.get("text") or body.get("prompt")
     if not text:
         raise HTTPException(400, "`text` is required")
 
-    async with _get_semaphore():
-        try:
-            result = await _adapter.sound_effect_async(
-                text=text,
-                model=body.get("model"),
-                duration_seconds=body.get("duration_seconds"),
-                prompt_influence=body.get("prompt_influence"),
-                response_format=body.get("response_format"),
-            )
-        except PaymentError as exc:
-            return JSONResponse(status_code=402, content=_payment_error_payload(exc))
-        except APIError as exc:
-            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
-            return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    return result
+    model: Optional[str] = body.get("model")
+    return await _media_endpoint(
+        "/v1/audio/sound-effects",
+        model,
+        lambda: _adapter.sound_effect_async(
+            text=text,
+            model=model,
+            duration_seconds=body.get("duration_seconds"),
+            prompt_influence=body.get("prompt_influence"),
+            response_format=body.get("response_format"),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +770,9 @@ async def audio_sound_effects(request: Request) -> Any:
 _RESPONSES_INPUT_ROLES = {"system", "user", "assistant", "tool"}
 
 
-def _responses_to_chat(body: Dict[str, Any]) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, Any], bool]:
+def _responses_to_chat(
+    body: Dict[str, Any],
+) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, Any], bool]:
     """Translate a Responses API request → (model, messages, openai_kwargs, stream)."""
     model = body.get("model")
     messages: List[Dict[str, Any]] = []
@@ -817,22 +861,45 @@ async def _responses_sse_stream(
     created = int(time.time())
     seq = 0
 
-    def base(status: str, output: List[Dict[str, Any]], usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def base(
+        status: str, output: List[Dict[str, Any]], usage: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         r: Dict[str, Any] = {
-            "id": rid, "object": "response", "created_at": created,
-            "model": model, "status": status, "output": output,
+            "id": rid,
+            "object": "response",
+            "created_at": created,
+            "model": model,
+            "status": status,
+            "output": output,
         }
         if usage is not None:
             r["usage"] = usage
         return r
 
-    yield _responses_event(seq, "response.created", {"response": base("in_progress", [])}); seq += 1
-    item_stub = {"id": msg_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []}
-    yield _responses_event(seq, "response.output_item.added", {"output_index": 0, "item": item_stub}); seq += 1
-    yield _responses_event(seq, "response.content_part.added", {
-        "item_id": msg_id, "output_index": 0, "content_index": 0,
-        "part": {"type": "output_text", "text": "", "annotations": []},
-    }); seq += 1
+    yield _responses_event(seq, "response.created", {"response": base("in_progress", [])})
+    seq += 1
+    item_stub = {
+        "id": msg_id,
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+    }
+    yield _responses_event(
+        seq, "response.output_item.added", {"output_index": 0, "item": item_stub}
+    )
+    seq += 1
+    yield _responses_event(
+        seq,
+        "response.content_part.added",
+        {
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+    )
+    seq += 1
 
     parts: List[str] = []
     usage_out = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -847,9 +914,17 @@ async def _responses_sse_stream(
                 delta = (ch.get("delta") or {}).get("content")
                 if delta:
                     parts.append(delta)
-                    yield _responses_event(seq, "response.output_text.delta", {
-                        "item_id": msg_id, "output_index": 0, "content_index": 0, "delta": delta,
-                    }); seq += 1
+                    yield _responses_event(
+                        seq,
+                        "response.output_text.delta",
+                        {
+                            "item_id": msg_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                        },
+                    )
+                    seq += 1
                 u = cd.get("usage")
                 if u:
                     usage_out = {
@@ -858,16 +933,24 @@ async def _responses_sse_stream(
                         "total_tokens": u.get("total_tokens", 0),
                     }
         except PaymentError as exc:
-            yield _responses_event(seq, "response.failed", {
-                "response": base("failed", []),
-                "error": {"code": "payment_error", "message": _payment_error_sse_message(exc)},
-            })
+            yield _responses_event(
+                seq,
+                "response.failed",
+                {
+                    "response": base("failed", []),
+                    "error": {"code": "payment_error", "message": _payment_error_sse_message(exc)},
+                },
+            )
             return
         except APIError as exc:
-            yield _responses_event(seq, "response.failed", {
-                "response": base("failed", []),
-                "error": {"code": "upstream_error", "message": str(exc)},
-            })
+            yield _responses_event(
+                seq,
+                "response.failed",
+                {
+                    "response": base("failed", []),
+                    "error": {"code": "upstream_error", "message": str(exc)},
+                },
+            )
             return
         except Exception as exc:  # noqa: BLE001
             if _is_solana_rpc_exc(exc):
@@ -876,26 +959,53 @@ async def _responses_sse_stream(
             else:
                 log.exception("responses stream error")
                 msg = str(exc)
-            yield _responses_event(seq, "response.failed", {
-                "response": base("failed", []),
-                "error": {"code": "server_error", "message": msg},
-            })
+            yield _responses_event(
+                seq,
+                "response.failed",
+                {
+                    "response": base("failed", []),
+                    "error": {"code": "server_error", "message": msg},
+                },
+            )
             return
 
     text = "".join(parts)
-    yield _responses_event(seq, "response.output_text.done", {
-        "item_id": msg_id, "output_index": 0, "content_index": 0, "text": text,
-    }); seq += 1
-    yield _responses_event(seq, "response.content_part.done", {
-        "item_id": msg_id, "output_index": 0, "content_index": 0,
-        "part": {"type": "output_text", "text": text, "annotations": []},
-    }); seq += 1
+    yield _responses_event(
+        seq,
+        "response.output_text.done",
+        {
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": text,
+        },
+    )
+    seq += 1
+    yield _responses_event(
+        seq,
+        "response.content_part.done",
+        {
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": text, "annotations": []},
+        },
+    )
+    seq += 1
     final_item = {
-        "id": msg_id, "type": "message", "status": "completed", "role": "assistant",
+        "id": msg_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
-    yield _responses_event(seq, "response.output_item.done", {"output_index": 0, "item": final_item}); seq += 1
-    yield _responses_event(seq, "response.completed", {"response": base("completed", [final_item], usage_out)})
+    yield _responses_event(
+        seq, "response.output_item.done", {"output_index": 0, "item": final_item}
+    )
+    seq += 1
+    yield _responses_event(
+        seq, "response.completed", {"response": base("completed", [final_item], usage_out)}
+    )
 
 
 @app.post("/v1/responses", dependencies=[Depends(_require_token)])
