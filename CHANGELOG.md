@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.0 — 2026-07-06
+
+### Added
+- **Media endpoints on the FastAPI sidecar** (#14). The proxy only exposed
+  `/v1/images/generations`, so OpenAI-compatible clients (LiteLLM) could not
+  reach the gateway's video/audio models. Adds:
+  - `POST /v1/videos/generations`
+  - `POST /v1/audio/speech`
+  - `POST /v1/audio/generations` (music)
+  - `POST /v1/audio/sound-effects`
+
+  The adapter dispatches Base (dedicated `VideoClient`/`MusicClient`/
+  `SpeechClient`) vs Solana (unified `SolanaLLMClient`) per request; sync SDK
+  clients run in a shared thread pool. Validated live end-to-end on Solana
+  mainnet.
+
+### Changed
+- **Require `blockrun-llm[solana]>=1.5.0`** for the `solana` extra — Solana
+  media (`SolanaLLMClient.video/music/speech/sound_effect`) landed in the SDK's
+  1.5.0 release (blockrun-llm #16; also carries #17 rpc_batch cache fix, #18
+  `solana<0.40` pin, #19 media hardening). Older SDKs degrade Solana media to a
+  clear 501, not a 500. The core `blockrun-llm>=1.4.7` floor is unchanged — Base
+  media clients predate it.
+- Synced `__version__` (was stale at 0.4.2).
+
+### Hardened (#15, media-endpoints review follow-up)
+- `ValueError → 400` on **all** media routes via a shared `_media_endpoint`
+  helper (was video-only; music-with-lyrics 500'd instead of returning the SDK's
+  clear message).
+- Solana media on a pre-1.5.0 SDK degrades to a clear **501** upgrade hint
+  instead of an `AttributeError` 500.
+- Long media (video 60–900s, music 60–210s) moved to a dedicated 8-thread pool
+  (`BLOCKRUN_LONG_MEDIA_THREADS`); all media routes gated behind their own
+  semaphore (`BLOCKRUN_MEDIA_MAX_CONCURRENT`, default 20) so a video burst can no
+  longer starve images or brick chat/messages.
+- Client-supplied `budget_seconds`/`timeout` clamped to the 900s server cap
+  (was forwarded verbatim — one request body could pin a worker for a day);
+  every media call wrapped in `asyncio.wait_for` so the coroutine + semaphore
+  permit always release even if the SDK thread wedges (504).
+- Media calls now audit-log via `log_proxy_call` and surface the in-body
+  settlement txHash as `x-blockrun-settlement` (paid media traffic was invisible
+  to spend reconciliation). NB: media SDK responses don't expose `cost_usd` yet,
+  so media audit rows log `cost_usd=None` with only the settlement txHash.
+- Full negative-path pytest suites for all 5 media routes + adapter
+  dispatch/clamp/guard/ceiling tests.
+
 ## 0.4.7 — 2026-06-26
 
 ### Added
