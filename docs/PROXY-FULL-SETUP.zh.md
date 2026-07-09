@@ -220,6 +220,34 @@ model_list:
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
+  # --- 图像 / 视频模型（媒体计费必须配自定义单价，见下方说明） ---
+  - model_name: grok-imagine-image
+    litellm_params:
+      model: openai/xai/grok-imagine-image
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 1.9073486328125e-08   # $0.02/张 ÷ 1048576 像素
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-image-pro
+    litellm_params:
+      model: openai/xai/grok-imagine-image-pro
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 6.67572021484375e-08  # $0.07/张 ÷ 1048576 像素
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-video
+    litellm_params:
+      model: openai/xai/grok-imagine-video
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      output_cost_per_second: 0.05                # $0.05/秒
+    model_info:
+      mode: video_generation
+
 litellm_settings:
   drop_params: True                            # 静默丢弃 BlockRun 不支持的 OpenAI 参数
   callbacks: ["custom_callbacks.blockrun_logger"]   # JSONL 请求日志
@@ -228,6 +256,17 @@ general_settings:
   master_key: "sk-blockrun-demo-master"        # ← 生产环境务必改！
                                                # 同时也是 UI 默认密码（admin / <master_key>）
 ```
+
+> **为什么要写 `input_cost_per_pixel` / `output_cost_per_second`？**
+> LiteLLM 按它自带的价格表计费，表里没有 BlockRun 路由的媒体模型——不配
+> 自定义单价，每次图像/视频调用 LiteLLM 都记 **$0**（Chat 模型不用配：
+> sidecar 在 `x-litellm-response-cost` 响应头里返回真实 x402 扣费，
+> LiteLLM 直接采用）。图像计费公式是 `input_cost_per_pixel × 宽 × 高 × n`，
+> 固定张价除以 1024×1024 即可。视频计费 = `output_cost_per_second ×
+> seconds`——`POST /v1/videos` 时**务必带 `seconds`**，否则该次调用记 $0。
+> 视频走 sidecar 的 OpenAI 兼容 Videos API（`POST /videos` → 轮询
+> `GET /videos/{id}` → `GET /videos/{id}/content`），blockrun-litellm
+> 0.6.0 起可用。
 
 ### `custom_callbacks.py`
 

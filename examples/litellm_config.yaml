@@ -94,6 +94,41 @@ model_list:
       input_cost_per_token: 0.000002    # $2 / 1M
       output_cost_per_token: 0.000012   # $12 / 1M
 
+  # ── Image / video models ────────────────────────────────────────────────
+  # Media models are NOT in LiteLLM's price map either. Images bill as
+  # `input_cost_per_pixel × width × height × n` (flat per-image price ÷
+  # 1024×1024 = 1048576); video bills as `output_cost_per_second × seconds` —
+  # always pass `seconds` on POST /v1/videos or the call is priced $0.
+  # Video routes through the sidecar's OpenAI-compatible Videos API
+  # (POST /videos → poll GET /videos/{id} → GET /videos/{id}/content),
+  # available since blockrun-litellm 0.6.0.
+  - model_name: grok-imagine-image
+    litellm_params:
+      model: openai/xai/grok-imagine-image
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 1.9073486328125e-08   # $0.02/image ÷ 1048576 px
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-image-pro
+    litellm_params:
+      model: openai/xai/grok-imagine-image-pro
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 6.67572021484375e-08  # $0.07/image ÷ 1048576 px
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-video
+    litellm_params:
+      model: openai/xai/grok-imagine-video
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      output_cost_per_second: 0.05                # $0.05/second
+    model_info:
+      mode: video_generation
+
   # Wildcard fallback — any BlockRun model id passed as the model name will be
   # forwarded as-is. Useful if your app already speaks BlockRun model names.
   # ⚠️  Calls matched by this wildcard are NOT priced (no per-token cost), so
@@ -111,12 +146,13 @@ litellm_settings:
   # let LiteLLM drop them silently instead of warning on every request.
   drop_params: True
 
-  # Optional: surface BlockRun's per-request USDC cost on LiteLLM's metrics.
-  # The gateway can return the exact settled price in an `x-blockrun-cost-usd`
-  # response header; a custom callback can read it and override `response_cost`
-  # for exact wallet reconciliation. The per-model `*_cost_per_token` values
-  # above already make spend/budgets accurate from real token counts, so this
-  # header path is an optional enhancement, not required for budgets to work.
+  # Exact chat spend, no callback needed: since blockrun-litellm 0.6.0 the
+  # sidecar returns the real settled x402 charge in the
+  # `x-litellm-response-cost` response header, which LiteLLM reads off
+  # openai-compatible upstreams and uses as `response_cost` directly (it
+  # overrides the per-token estimate above when present). The per-model
+  # `*_cost_per_token` values remain as the fallback for LiteLLM versions or
+  # call paths that don't capture upstream headers.
 
 general_settings:
   # Bind LiteLLM Proxy here; clients talk to LiteLLM, LiteLLM talks to our sidecar.

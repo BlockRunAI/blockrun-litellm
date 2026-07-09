@@ -96,6 +96,10 @@ def test_non_stream_surfaces_cost_header(monkeypatch, client):
     assert resp.status_code == 200
     assert resp.content == b'{"id":"chatcmpl_1","object":"chat.completion"}'  # body untouched
     assert float(resp.headers["x-blockrun-cost-usd"]) == pytest.approx(REAL_COST)
+    # LiteLLM's cost tracker reads this exact header off an openai-compatible
+    # upstream (additional_headers["llm_provider-x-litellm-response-cost"]),
+    # so a LiteLLM proxy pointed at the sidecar bills the REAL x402 charge.
+    assert float(resp.headers["x-litellm-response-cost"]) == pytest.approx(REAL_COST)
     settlement = json.loads(resp.headers["x-blockrun-settlement"])
     assert settlement["tx_hash"] == "0xabc123"
     assert settlement["network"] == "eip155:8453"
@@ -119,6 +123,79 @@ def test_streaming_surfaces_cost_header(monkeypatch, client):
     assert float(resp.headers["x-blockrun-cost-usd"]) == pytest.approx(REAL_COST)
 
 
+def _payment_signature_header(value_micro: str = "1000") -> str:
+    """An x402 'exact'-scheme PAYMENT-SIGNATURE payload as the SDK signs it —
+    ``payload.authorization.value`` carries the exact micro-USDC charge."""
+    payload = {
+        "x402Version": 1,
+        "scheme": "exact",
+        "payload": {"authorization": {"value": value_micro, "from": "0xpayer"}},
+    }
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+def test_v2_payment_response_header_name_and_signed_amount_fallback(monkeypatch, client):
+    """The Base gateway emits the x402 v2 header name ``PAYMENT-RESPONSE`` (no
+    ``X-`` prefix) and its payload carries NO amount — the cost must come from
+    the signed authorization instead. Regression: live Base chat surfaced no
+    cost headers at all because only ``x-payment-response`` was checked."""
+    settlement_no_amount = base64.b64encode(
+        json.dumps(
+            {"success": True, "transaction": "0xabc123", "network": "eip155:8453"}
+        ).encode()
+    ).decode()
+    ok = httpx.Response(
+        200,
+        headers={
+            "content-type": "application/json",
+            "payment-response": settlement_no_amount,
+            proxy._SIGNED_AMOUNT_HEADER: "63540",
+        },
+        content=b'{"id":"chatcmpl_1"}',
+    )
+    _patch(monkeypatch, ok)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "deepseek/deepseek-chat", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert float(resp.headers["x-blockrun-cost-usd"]) == pytest.approx(REAL_COST)
+    assert float(resp.headers["x-litellm-response-cost"]) == pytest.approx(REAL_COST)
+    assert json.loads(resp.headers["x-blockrun-settlement"])["tx_hash"] == "0xabc123"
+
+
+def test_signed_amount_transport_stamps_response():
+    """After the SDK's x402 transport signs a 402 retry, the outgoing request
+    carries PAYMENT-SIGNATURE; the wrapper must decode the exact authorized
+    charge onto the response so the proxy can surface it."""
+
+    class _Inner(httpx.BaseTransport):
+        def handle_request(self, request):
+            # Simulate the SDK transport: it mutates the request in place.
+            request.headers["PAYMENT-SIGNATURE"] = _payment_signature_header("63540")
+            return httpx.Response(200, content=b"{}")
+
+    transport = proxy._SignedAmountTransport(_Inner())
+    resp = transport.handle_request(httpx.Request("POST", "https://blockrun.ai/api/v1/messages"))
+    assert resp.headers[proxy._SIGNED_AMOUNT_HEADER] == "63540"
+
+
+def test_signed_amount_transport_no_signature_no_header():
+    class _Inner(httpx.BaseTransport):
+        def handle_request(self, request):
+            return httpx.Response(200, content=b"{}")
+
+    transport = proxy._SignedAmountTransport(_Inner())
+    resp = transport.handle_request(httpx.Request("POST", "https://blockrun.ai/api/v1/messages"))
+    assert proxy._SIGNED_AMOUNT_HEADER not in resp.headers
+
+
+def test_decode_signed_amount():
+    assert proxy._decode_signed_amount_micro(_payment_signature_header("63540")) == "63540"
+    assert proxy._decode_signed_amount_micro(None) is None
+    assert proxy._decode_signed_amount_micro("not-base64!!") is None
+
+
 def test_no_payment_header_no_cost_header(monkeypatch, client):
     # Free/cached call: no X-PAYMENT-RESPONSE -> no cost header (graceful).
     ok = httpx.Response(
@@ -134,6 +211,7 @@ def test_no_payment_header_no_cost_header(monkeypatch, client):
     )
     assert resp.status_code == 200
     assert "x-blockrun-cost-usd" not in resp.headers
+    assert "x-litellm-response-cost" not in resp.headers
 
 
 # ---------------------------------------------------------------------------
