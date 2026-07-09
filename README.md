@@ -251,6 +251,88 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
+### 2b-ii. Image / video models through LiteLLM — routing **and** billing
+
+Two things trip people up when they add BlockRun's media models
+(`xai/grok-imagine-image`, `xai/grok-imagine-image-pro`,
+`xai/grok-imagine-video`, …) to a LiteLLM proxy:
+
+1. **LiteLLM logs $0 spend for them.** LiteLLM prices calls from its bundled
+   price map (`model_prices_and_context_window.json`), which has **no**
+   BlockRun-routed media models — the cost lookup fails and the request is
+   recorded at $0. Fix: declare the price in `litellm_params` (LiteLLM's
+   [custom pricing](https://docs.litellm.ai/docs/proxy/custom_pricing)).
+   LiteLLM bills images as `input_cost_per_pixel × width × height × n`, so a
+   flat per-image price divides by 1024×1024 = 1,048,576.
+2. **Video needs the OpenAI Videos API.** LiteLLM never calls the sidecar's
+   native `/v1/videos/generations`; it speaks the OpenAI Videos spec
+   (`POST /videos` → poll `GET /videos/{id}` → `GET /videos/{id}/content`),
+   which the sidecar exposes since 0.6.0.
+
+Working `config.yaml` for all three:
+
+```yaml
+model_list:
+  # --- images: flat per-image price (1024x1024) ---
+  - model_name: grok-imagine-image
+    litellm_params:
+      model: openai/xai/grok-imagine-image
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 1.9073486328125e-08   # $0.02 / 1048576 px
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-image-pro
+    litellm_params:
+      model: openai/xai/grok-imagine-image-pro
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 6.67572021484375e-08  # $0.07 / 1048576 px
+    model_info:
+      mode: image_generation
+
+  # --- video: $0.05/second ---
+  - model_name: grok-imagine-video
+    litellm_params:
+      model: openai/xai/grok-imagine-video
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      output_cost_per_second: 0.05
+    model_info:
+      mode: video_generation
+```
+
+Call them through LiteLLM:
+
+```bash
+# image
+curl http://localhost:4000/v1/images/generations \
+  -H "Authorization: Bearer $LITELLM_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "grok-imagine-image", "prompt": "a corgi astronaut"}'
+
+# video — create, then poll the returned id until status=completed
+curl http://localhost:4000/v1/videos \
+  -H "Authorization: Bearer $LITELLM_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "grok-imagine-video", "prompt": "a corgi surfing", "seconds": "8"}'
+```
+
+Notes:
+
+- Pass `seconds` on video creates — LiteLLM computes video spend from the
+  `seconds` echoed on the create response (`output_cost_per_second ×
+  seconds`), so omitting it records $0 for that call.
+- Video jobs live in the sidecar process' memory (TTL 24h, override with
+  `BLOCKRUN_VIDEO_JOB_TTL`); poll the same sidecar instance that accepted
+  the create — don't run multiple sidecar replicas behind one LiteLLM
+  video model without sticky routing.
+- **Chat spend needs no config**: since 0.6.0 the sidecar returns the real
+  x402 charge in the `x-litellm-response-cost` response header, which
+  LiteLLM reads off openai-compatible upstreams and records as the
+  request's spend — the exact wallet deduction, not an estimate.
+- The custom-pricing numbers above are BlockRun's list prices; check
+  [blockrun.ai/models](https://blockrun.ai/models) if they've moved.
+
 ### 2c. Or skip LiteLLM entirely
 
 The proxy speaks OpenAI HTTP, so anything that takes an `api_base` works:
@@ -281,6 +363,13 @@ curl http://localhost:4001/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
 | `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
 | `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
+| `POST` | `/v1/videos` | OpenAI Videos API create (what LiteLLM's video routes call) — returns a job object immediately |
+| `GET`  | `/v1/videos/{id}` | OpenAI Videos API status poll (`queued` → `in_progress` → `completed`/`failed`) |
+| `GET`  | `/v1/videos/{id}/content` | Download the finished clip bytes |
+| `POST` | `/v1/videos/generations` | Native video generation — blocks until the clip is ready; settles only on completion |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible TTS |
+| `POST` | `/v1/audio/generations` | Music generation |
+| `POST` | `/v1/audio/sound-effects` | Cinematic sound effects |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
@@ -594,6 +683,49 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好"}],
 )
 ```
+
+### 图像 / 视频模型上 LiteLLM：调用 + 计费
+
+把 `xai/grok-imagine-image` / `-image-pro` / `grok-imagine-video` 挂到 LiteLLM Proxy 时有两个坑：
+
+1. **LiteLLM 记账为 $0** —— LiteLLM 按自带价格表算钱，表里没有这些模型，成本查询失败就记 0。解法：在 `litellm_params` 里声明[自定义单价](https://docs.litellm.ai/docs/proxy/custom_pricing)。图像按 `input_cost_per_pixel × 宽 × 高 × n` 计，固定张价除以 1024×1024。
+2. **视频要走 OpenAI Videos API** —— LiteLLM 不会调 sidecar 原生的 `/v1/videos/generations`，它打的是 `POST /videos` → 轮询 `GET /videos/{id}` → `GET /videos/{id}/content`，sidecar 0.6.0 起已支持。
+
+```yaml
+model_list:
+  - model_name: grok-imagine-image
+    litellm_params:
+      model: openai/xai/grok-imagine-image
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 1.9073486328125e-08   # $0.02/张 ÷ 1048576 像素
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-image-pro
+    litellm_params:
+      model: openai/xai/grok-imagine-image-pro
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 6.67572021484375e-08  # $0.07/张 ÷ 1048576 像素
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-video
+    litellm_params:
+      model: openai/xai/grok-imagine-video
+      api_base: http://localhost:4001/v1
+      api_key: "dummy"
+      output_cost_per_second: 0.05                # $0.05/秒
+    model_info:
+      mode: video_generation
+```
+
+注意事项：
+
+- 视频创建请求**务必带 `seconds`**（如 `"8"`）—— LiteLLM 按创建响应回显的 seconds × 每秒单价计费，不带就记 $0。
+- 视频任务存在 sidecar 进程内存里（TTL 24 小时，`BLOCKRUN_VIDEO_JOB_TTL` 可调），轮询要打到接收创建请求的同一个 sidecar 实例。
+- **Chat 计费无需任何配置**：0.6.0 起 sidecar 在响应头 `x-litellm-response-cost` 返回真实 x402 扣费，LiteLLM 直接采用，分毫不差。
 
 ## 支持的参数
 

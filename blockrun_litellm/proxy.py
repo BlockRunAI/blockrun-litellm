@@ -14,6 +14,9 @@ Endpoints
 - ``POST /v1/images/generations``    — OpenAI Image Generations (DALL-E compatible)
 - ``POST /v1/videos/generations``    — video generation (xai/grok-imagine-video,
   Seedance); async submit+poll, settles only on completion
+- ``POST /v1/videos`` + ``GET /v1/videos/{id}`` + ``GET /v1/videos/{id}/content``
+  — OpenAI Videos API (what LiteLLM's video routes call): create returns a
+  job object at once; poll status; download bytes on completion
 - ``POST /v1/audio/speech``          — OpenAI-compatible TTS (ElevenLabs voices)
 - ``POST /v1/audio/generations``     — music generation (minimax/music-2.5+)
 - ``POST /v1/audio/sound-effects``   — cinematic sound effects
@@ -41,7 +44,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import logging
+import math
 import os
 import threading
 import time
@@ -331,7 +336,9 @@ def _messages_client(api_url: str) -> httpx.Client:
     # (/v1/messages), which is exactly where reasoning models (opus-4.8 extended
     # thinking, 200–300s+) would otherwise time out mid-generation at the old
     # hardcoded 300s while the gateway kept billing server-side.
-    client = httpx.Client(transport=transport, timeout=_adapter._CHAT_TIMEOUT)
+    client = httpx.Client(
+        transport=_SignedAmountTransport(transport), timeout=_adapter._CHAT_TIMEOUT
+    )
     _messages_http_clients[api_url] = client
     return client
 
@@ -368,22 +375,77 @@ def _open_upstream_stream(
     return client.send(req, stream=True)
 
 
+# Synthetic response header the sidecar's own transport wrapper stamps with
+# the exact authorized charge (micro-USDC), decoded from the request's
+# PAYMENT-SIGNATURE. Needed because the Base gateway's settlement header
+# (x402 v2 ``PAYMENT-RESPONSE``) carries no amount field — without this the
+# passthrough knew the tx hash but not the charge.
+_SIGNED_AMOUNT_HEADER = "x-blockrun-signed-amount-micro"
+
+
+def _decode_signed_amount_micro(header: Optional[str]) -> Optional[str]:
+    """Extract the exact micro-USDC charge from an x402 PAYMENT-SIGNATURE
+    payload. The SDK signs the 'exact' scheme only, so
+    ``payload.authorization.value`` IS the charge (same source as the SDK's
+    own ``cost_usd``: the gateway's 402 quote). Returns ``None`` on any
+    missing/malformed input — cost surfacing is informational, never fatal."""
+    if not header:
+        return None
+    try:
+        data = _json.loads(base64.b64decode(header))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("payload") or {}
+    value = (payload.get("authorization") or {}).get("value")
+    return str(value) if value is not None else None
+
+
+class _SignedAmountTransport(httpx.BaseTransport):
+    """Wraps an x402-signing transport and stamps the authorized charge onto
+    the response as :data:`_SIGNED_AMOUNT_HEADER`.
+
+    The SDK's signing transports mutate the request in place (they set
+    ``PAYMENT-SIGNATURE`` on the original request before the paid retry), so
+    after ``handle_request`` returns, the request tells us whether — and for
+    exactly how much — this call paid. Free/cached calls never gain the
+    signature, so they surface no cost, as before."""
+
+    def __init__(self, inner: httpx.BaseTransport):
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = self._inner.handle_request(request)
+        if response.status_code < 400 and _SIGNED_AMOUNT_HEADER not in response.headers:
+            amount = _decode_signed_amount_micro(request.headers.get("PAYMENT-SIGNATURE"))
+            if amount is not None:
+                response.headers[_SIGNED_AMOUNT_HEADER] = amount
+        return response
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 def _proxy_cost_from_headers(
     headers: Any,
 ) -> Tuple[Optional[float], Optional[Dict[str, Any]]]:
-    """Decode the real on-chain charge from the gateway's ``X-PAYMENT-RESPONSE``
-    response header.
+    """Decode the real on-chain charge from the gateway's settlement response
+    header — ``PAYMENT-RESPONSE`` per the x402 v2 spec (what the Base gateway
+    sends), with the legacy ``X-PAYMENT-RESPONSE`` name still accepted.
 
-    This header is set per-response on the paid call, so the charge is read
-    race-free (no shared-transport correlation) and is available on the upstream
-    response before the stream body is drained. Returns ``(None, None)`` for free
-    / cached calls (no header) — graceful, like the older-SDK estimate fallback.
+    The v2 settlement payload carries no amount, so the charge falls back to
+    :data:`_SIGNED_AMOUNT_HEADER` (stamped by :class:`_SignedAmountTransport`
+    from the exact-scheme authorization this sidecar itself signed). Headers
+    are read per-response on the paid call — race-free, and available before
+    the stream body is drained. Returns ``(None, None)`` for free / cached
+    calls — graceful, like the older-SDK estimate fallback.
     """
-    raw = headers.get("x-payment-response") or headers.get("X-PAYMENT-RESPONSE")
+    raw = headers.get("x-payment-response") or headers.get("payment-response")
     settlement = decode_settlement_header(raw)
-    if not settlement:
-        return None, None
-    amount = settlement.get("amount_micro_usdc")
+    amount = settlement.get("amount_micro_usdc") if settlement else None
+    if amount is None:
+        amount = headers.get(_SIGNED_AMOUNT_HEADER)
     cost: Optional[float] = None
     if amount is not None:
         try:
@@ -397,10 +459,19 @@ def _cost_response_headers(
     cost: Optional[float], settlement: Optional[Dict[str, Any]]
 ) -> Dict[str, str]:
     """Client-visible headers carrying the real wallet charge for this call, so
-    an agent / downstream proxy can track spend per request."""
+    an agent / downstream proxy can track spend per request.
+
+    ``x-litellm-response-cost`` is the header LiteLLM itself emits for proxy
+    chaining; a LiteLLM proxy pointed at this sidecar reads it back off the
+    upstream response (``additional_headers["llm_provider-x-litellm-response-
+    cost"]`` in its cost calculator) and records the REAL x402 charge as the
+    request's spend instead of a token×price-map estimate — the price map has
+    no BlockRun-routed models, so without this header LiteLLM logs $0.
+    """
     out: Dict[str, str] = {}
     if cost is not None:
         out["x-blockrun-cost-usd"] = format(cost, ".10g")
+        out["x-litellm-response-cost"] = format(cost, ".10g")
     if settlement:
         out["x-blockrun-settlement"] = _json.dumps(settlement, default=str)
     return out
@@ -680,6 +751,244 @@ async def video_generations(request: Request) -> Any:
         "/v1/videos/generations",
         model,
         lambda: _adapter.video_generation_async(prompt=prompt, model=model, **params),
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible Videos API (/v1/videos) — what LiteLLM's video routes call
+# ---------------------------------------------------------------------------
+# LiteLLM's video generation (litellm.video_generation / proxy /v1/videos)
+# speaks the OpenAI Videos spec against an ``openai/``-provider api_base:
+#
+#   POST {api_base}/videos              -> video JOB object (returns at once)
+#   GET  {api_base}/videos/{id}         -> poll status
+#   GET  {api_base}/videos/{id}/content -> download bytes
+#
+# The sidecar's native ``/v1/videos/generations`` blocks until the clip is
+# ready and is invisible to LiteLLM — which is why ``xai/grok-imagine-video``
+# "couldn't be called" through a LiteLLM proxy. These routes bridge the gap:
+# create spawns the blocking SDK submit+poll as a background task and returns
+# a job id immediately; status reads the job; content streams the finished
+# CDN URL. Jobs live in-memory (the sidecar is a single-process uvicorn), so
+# poll the same sidecar instance that took the create.
+
+_VIDEO_JOB_TTL_S: float = float(os.environ.get("BLOCKRUN_VIDEO_JOB_TTL", "86400"))
+_video_jobs: Dict[str, Dict[str, Any]] = {}
+
+# Short side of the requested WxH -> the gateway's resolution tier.
+_RESOLUTION_LADDER = ((2160, "4K"), (1080, "1080p"), (720, "720p"), (480, "480p"))
+_SUPPORTED_ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21"}
+
+
+def _map_openai_video_size(size: str) -> Dict[str, Any]:
+    """OpenAI ``size`` ("720x1280") -> gateway ``resolution`` (+ ``aspect_ratio``
+    when the WxH reduces to a ratio the gateway accepts; otherwise omitted —
+    Grok ignores both fields, Seedance validates them)."""
+    try:
+        width, height = (int(p) for p in size.lower().split("x"))
+        if width <= 0 or height <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "`size` must look like 720x1280")
+    short = min(width, height)
+    resolution = "360p"
+    for floor, tier in _RESOLUTION_LADDER:
+        if short >= floor:
+            resolution = tier
+            break
+    out: Dict[str, Any] = {"resolution": resolution}
+    divisor = math.gcd(width, height)
+    ratio = f"{width // divisor}:{height // divisor}"
+    if ratio in _SUPPORTED_ASPECT_RATIOS:
+        out["aspect_ratio"] = ratio
+    return out
+
+
+def _openai_video_kwargs(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate an OpenAI Videos create body into ``video_generation_async``
+    kwargs. OpenAI params (``seconds``/``size``) are mapped; BlockRun-native
+    params (``image_url`` etc., see VIDEO_PARAM_KEYS) pass through for direct
+    callers and win over the mapped values."""
+    kwargs: Dict[str, Any] = {}
+    seconds = body.get("seconds")
+    if seconds is not None:
+        try:
+            kwargs["duration_seconds"] = int(float(seconds))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "`seconds` must be numeric (e.g. \"8\")")
+    if body.get("size") is not None:
+        kwargs.update(_map_openai_video_size(body["size"]))
+    kwargs.update({k: body[k] for k in _adapter.VIDEO_PARAM_KEYS if body.get(k) is not None})
+    return kwargs
+
+
+def _prune_video_jobs() -> None:
+    now = time.time()
+    for job_id in [
+        jid for jid, j in _video_jobs.items() if now - j["created_at"] > _VIDEO_JOB_TTL_S
+    ]:
+        _video_jobs.pop(job_id, None)
+
+
+def _video_object(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Render a job as the OpenAI video object LiteLLM's ``VideoObject`` parses
+    (required: id / object / status; ``seconds`` feeds its cost usage)."""
+    out: Dict[str, Any] = {
+        "id": job["id"],
+        "object": "video",
+        "status": job["status"],
+        "created_at": int(job["created_at"]),
+        "model": job["model"],
+    }
+    if job.get("seconds") is not None:
+        out["seconds"] = str(job["seconds"])
+    if job.get("size") is not None:
+        out["size"] = job["size"]
+    if job.get("completed_at") is not None:
+        out["completed_at"] = int(job["completed_at"])
+    if job.get("error") is not None:
+        out["error"] = job["error"]
+    if job["status"] == "completed":
+        out["progress"] = 100
+    return out
+
+
+def _video_job_settlement(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return _media_settlement(job.get("result"))
+
+
+async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any]) -> None:
+    """Drive the blocking SDK submit+poll for one video job and record the
+    outcome on the job dict. Errors are folded into the OpenAI ``error`` shape
+    so a poller sees status=failed instead of a hung queue."""
+    _t0 = time.monotonic()
+    status = 200
+    async with _get_media_semaphore():
+        job["status"] = "in_progress"
+        try:
+            result = await _adapter.video_generation_async(
+                prompt=prompt, model=job["model"], **kwargs
+            )
+            job["result"] = result
+            job["status"] = "completed"
+            job["completed_at"] = time.time()
+            clips = result.get("data") or []
+            duration = clips[0].get("duration_seconds") if clips else None
+            if duration is not None:
+                job["seconds"] = duration
+        except ValueError as exc:
+            job["status"], status = "failed", 400
+            job["error"] = {"code": "invalid_request", "message": str(exc)}
+        except PaymentError as exc:
+            job["status"], status = "failed", 402
+            job["error"] = {"code": "payment_error", "message": _payment_error_sse_message(exc)}
+        except APIError as exc:
+            status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
+            job["status"] = "failed"
+            job["error"] = {"code": "upstream_error", "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - background task must not die silently
+            log.exception("video job %s crashed", job["id"])
+            job["status"], status = "failed", 500
+            job["error"] = {"code": "server_error", "message": str(exc)}
+    _logger.log_proxy_call(
+        model=job["model"],
+        path="/v1/videos",
+        stream=False,
+        http_status=status,
+        cost_usd=None,
+        settlement=_video_job_settlement(job),
+        latency_ms=(time.monotonic() - _t0) * 1000.0,
+        request_id=job["id"],
+    )
+
+
+@app.post("/v1/videos", dependencies=[Depends(_require_token)])
+async def openai_videos_create(request: Request) -> Any:
+    """OpenAI Videos create. Returns the job object immediately; poll
+    ``GET /v1/videos/{id}`` until ``status=completed`` (typ. 60-180s — the
+    gateway settles payment only on completion), then fetch
+    ``GET /v1/videos/{id}/content``."""
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("multipart/form-data"):
+        # LiteLLM only sends multipart when `input_reference` (a raw image
+        # file) is passed. BlockRun's gateway takes image URLs, not uploads.
+        raise HTTPException(
+            400,
+            "input_reference file uploads are not supported — pass a public "
+            "image URL via the `image_url` body field for image-to-video",
+        )
+    body = await _json_body(request)
+
+    prompt = body.get("prompt")
+    if not prompt:
+        raise HTTPException(400, "`prompt` is required")
+
+    kwargs = _openai_video_kwargs(body)
+    _prune_video_jobs()
+
+    job: Dict[str, Any] = {
+        "id": f"video_{uuid.uuid4().hex}",
+        "status": "queued",
+        "created_at": time.time(),
+        "model": body.get("model"),
+        "seconds": body.get("seconds"),
+        "size": body.get("size"),
+        "result": None,
+        "error": None,
+    }
+    _video_jobs[job["id"]] = job
+    # Snapshot the response BEFORE scheduling — a fast job may flip the dict
+    # to in_progress/completed between create_task and serialization.
+    response_obj = _video_object(job)
+    asyncio.get_running_loop().create_task(_run_video_job(job, prompt, kwargs))
+    return JSONResponse(response_obj)
+
+
+def _get_video_job_or_404(video_id: str) -> Dict[str, Any]:
+    job = _video_jobs.get(video_id)
+    if job is None:
+        raise HTTPException(404, f"video job '{video_id}' not found (jobs expire after "
+                                 f"{int(_VIDEO_JOB_TTL_S)}s and live on the sidecar instance "
+                                 "that accepted the create)")
+    return job
+
+
+@app.get("/v1/videos/{video_id}", dependencies=[Depends(_require_token)])
+async def openai_videos_status(video_id: str) -> Any:
+    job = _get_video_job_or_404(video_id)
+    return JSONResponse(
+        _video_object(job),
+        headers=_cost_response_headers(None, _video_job_settlement(job)),
+    )
+
+
+async def _fetch_video_content(url: str) -> Tuple[bytes, str]:
+    """Download the finished clip from the gateway's CDN URL."""
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content, resp.headers.get("content-type", "video/mp4")
+
+
+@app.get("/v1/videos/{video_id}/content", dependencies=[Depends(_require_token)])
+async def openai_videos_content(video_id: str) -> Any:
+    job = _get_video_job_or_404(video_id)
+    if job["status"] != "completed":
+        raise HTTPException(
+            409, f"video job is '{job['status']}', not completed — poll GET /v1/videos/{video_id}"
+        )
+    clips = (job.get("result") or {}).get("data") or []
+    url = clips[0].get("url") if clips else None
+    if not url:
+        raise HTTPException(502, "completed job has no video URL")
+    try:
+        content, media_type = await _fetch_video_content(url)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"failed to fetch video content: {exc}")
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers=_cost_response_headers(None, _video_job_settlement(job)),
     )
 
 

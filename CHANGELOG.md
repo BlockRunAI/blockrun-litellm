@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.6.0 — 2026-07-08
+
+Fixes the two LiteLLM-integration gaps a partner hit with the
+`xai/grok-imagine-*` media models: image calls that LiteLLM recorded at **$0
+spend**, and a video model that LiteLLM **could not call at all**.
+
+### Added
+- **OpenAI-compatible Videos API on the sidecar.** LiteLLM's video routes
+  speak the OpenAI Videos spec against an `openai/`-provider `api_base` and
+  never call the sidecar's native blocking `/v1/videos/generations` — which is
+  why `xai/grok-imagine-video` was unreachable through a LiteLLM proxy. New
+  routes:
+  - `POST /v1/videos` — returns a video job object immediately; the blocking
+    SDK submit+poll runs as a background task (gated by the media semaphore)
+  - `GET /v1/videos/{id}` — status poll (`queued` → `in_progress` →
+    `completed`/`failed`, OpenAI `error` shape on failure)
+  - `GET /v1/videos/{id}/content` — streams the finished clip bytes
+
+  OpenAI params are mapped to the gateway shape (`seconds` →
+  `duration_seconds`; `size` "720x1280" → `resolution` + `aspect_ratio`);
+  BlockRun-native params (`image_url`, `generate_audio`, …) pass through for
+  direct callers and win over the mapped values. Jobs are in-memory with a
+  24h TTL (`BLOCKRUN_VIDEO_JOB_TTL`) — poll the sidecar instance that took
+  the create. `input_reference` file uploads are rejected with a clear 400
+  pointing at `image_url` (the gateway takes URLs, not uploads).
+- **`x-litellm-response-cost` response header** wherever the sidecar knows
+  the real x402 charge (chat/messages passthrough). LiteLLM reads this exact
+  header off openai-compatible upstreams (`additional_headers["llm_provider-
+  x-litellm-response-cost"]`) and records it as the request's spend — so a
+  LiteLLM proxy pointed at the sidecar now bills chat at the exact wallet
+  deduction with zero config, instead of $0 (BlockRun models aren't in
+  LiteLLM's price map).
+
+### Fixed
+- **Cost surfacing on the Base passthrough never fired in production**
+  (live-verified during this release). Two gaps, found by exercising a real
+  paid call:
+  - the Base gateway emits the settlement header under its x402 v2 spec name
+    `PAYMENT-RESPONSE` — the sidecar only checked the legacy
+    `X-PAYMENT-RESPONSE`, so it decoded nothing (both names now accepted);
+  - the v2 settlement payload carries **no amount field**, so even a decoded
+    header couldn't price the call. The passthrough transport is now wrapped
+    (`_SignedAmountTransport`): after the SDK signs a 402 retry, the exact
+    authorized charge is decoded from the request's own `PAYMENT-SIGNATURE`
+    (`payload.authorization.value`, 'exact' scheme — the same 402-quote
+    number the SDK reports as `cost_usd`) and used as the cost fallback.
+
+  Verified live on Base: a paid `deepseek/deepseek-chat` call now returns
+  `x-blockrun-cost-usd: 0.001` + `x-litellm-response-cost: 0.001`.
+
+### Docs
+- README (EN + 中文), `docs/PROXY-FULL-SETUP.md(.zh)` and
+  `examples/litellm_config.yaml`: LiteLLM `config.yaml` blocks for
+  `xai/grok-imagine-image` / `-pro` / `grok-imagine-video` with the
+  custom-pricing keys LiteLLM needs to bill media at BlockRun's list prices
+  (`input_cost_per_pixel` = flat per-image price ÷ 1048576;
+  `output_cost_per_second: 0.05`), `model_info.mode`
+  (`image_generation`/`video_generation`), and the always-pass-`seconds`
+  caveat for video spend.
+
+## 0.5.0 — 2026-07-06
+
+### Added
+- **Media endpoints on the FastAPI sidecar** (#14). The proxy only exposed
+  `/v1/images/generations`, so OpenAI-compatible clients (LiteLLM) could not
+  reach the gateway's video/audio models. Adds:
+  - `POST /v1/videos/generations`
+  - `POST /v1/audio/speech`
+  - `POST /v1/audio/generations` (music)
+  - `POST /v1/audio/sound-effects`
+
+  The adapter dispatches Base (dedicated `VideoClient`/`MusicClient`/
+  `SpeechClient`) vs Solana (unified `SolanaLLMClient`) per request; sync SDK
+  clients run in a shared thread pool. Validated live end-to-end on Solana
+  mainnet.
+
+### Changed
+- **Require `blockrun-llm[solana]>=1.5.0`** for the `solana` extra — Solana
+  media (`SolanaLLMClient.video/music/speech/sound_effect`) landed in the SDK's
+  1.5.0 release (blockrun-llm #16; also carries #17 rpc_batch cache fix, #18
+  `solana<0.40` pin, #19 media hardening). Older SDKs degrade Solana media to a
+  clear 501, not a 500. The core `blockrun-llm>=1.4.7` floor is unchanged — Base
+  media clients predate it.
+- Synced `__version__` (was stale at 0.4.2).
+
+### Hardened (#15, media-endpoints review follow-up)
+- `ValueError → 400` on **all** media routes via a shared `_media_endpoint`
+  helper (was video-only; music-with-lyrics 500'd instead of returning the SDK's
+  clear message).
+- Solana media on a pre-1.5.0 SDK degrades to a clear **501** upgrade hint
+  instead of an `AttributeError` 500.
+- Long media (video 60–900s, music 60–210s) moved to a dedicated 8-thread pool
+  (`BLOCKRUN_LONG_MEDIA_THREADS`); all media routes gated behind their own
+  semaphore (`BLOCKRUN_MEDIA_MAX_CONCURRENT`, default 20) so a video burst can no
+  longer starve images or brick chat/messages.
+- Client-supplied `budget_seconds`/`timeout` clamped to the 900s server cap
+  (was forwarded verbatim — one request body could pin a worker for a day);
+  every media call wrapped in `asyncio.wait_for` so the coroutine + semaphore
+  permit always release even if the SDK thread wedges (504).
+- Media calls now audit-log via `log_proxy_call` and surface the in-body
+  settlement txHash as `x-blockrun-settlement` (paid media traffic was invisible
+  to spend reconciliation). NB: media SDK responses don't expose `cost_usd` yet,
+  so media audit rows log `cost_usd=None` with only the settlement txHash.
+- Full negative-path pytest suites for all 5 media routes + adapter
+  dispatch/clamp/guard/ceiling tests.
+
 ## 0.4.7 — 2026-06-26
 
 ### Added

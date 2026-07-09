@@ -236,6 +236,34 @@ model_list:
       api_base: http://127.0.0.1:4001/v1
       api_key: "dummy"
 
+  # --- Image / video models (media billing needs custom pricing — see note below) ---
+  - model_name: grok-imagine-image
+    litellm_params:
+      model: openai/xai/grok-imagine-image
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 1.9073486328125e-08   # $0.02/image / 1048576 px
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-image-pro
+    litellm_params:
+      model: openai/xai/grok-imagine-image-pro
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      input_cost_per_pixel: 6.67572021484375e-08  # $0.07/image / 1048576 px
+    model_info:
+      mode: image_generation
+
+  - model_name: grok-imagine-video
+    litellm_params:
+      model: openai/xai/grok-imagine-video
+      api_base: http://127.0.0.1:4001/v1
+      api_key: "dummy"
+      output_cost_per_second: 0.05                # $0.05/second
+    model_info:
+      mode: video_generation
+
 litellm_settings:
   drop_params: True                            # silently drop OpenAI params BlockRun ignores
   callbacks: ["custom_callbacks.blockrun_logger"]   # JSONL request log
@@ -244,6 +272,20 @@ general_settings:
   master_key: "sk-blockrun-demo-master"        # ← change this in prod!
                                                # also becomes the UI password (admin / <master_key>)
 ```
+
+> **Why the `input_cost_per_pixel` / `output_cost_per_second` lines?**
+> LiteLLM prices calls from its bundled price map, which has no
+> BlockRun-routed media models — without the custom-pricing keys LiteLLM
+> records **$0 spend** for every image/video call (chat models are fine:
+> the sidecar returns the real x402 charge in the
+> `x-litellm-response-cost` header and LiteLLM uses it directly).
+> Image spend = `input_cost_per_pixel × width × height × n`, so a flat
+> per-image price divides by 1024×1024. Video spend =
+> `output_cost_per_second × seconds` — **always pass `seconds`** on
+> `POST /v1/videos` or LiteLLM records $0 for that call. Video requests
+> flow through the sidecar's OpenAI-compatible Videos API
+> (`POST /videos` → poll `GET /videos/{id}` → `GET /videos/{id}/content`),
+> available since blockrun-litellm 0.6.0.
 
 ### `custom_callbacks.py`
 
