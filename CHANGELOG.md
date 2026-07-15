@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.1 — 2026-07-15
+
+### Changed
+
+- **Solana extra floor bumped to `blockrun-llm[solana]>=1.6.1`**
+  (BlockRunAI/blockrun-llm#23). That release stops the SDK retrying payments a
+  wallet can never make: a payer whose USDC token account was never created
+  fails simulation with `InvalidAccountData`, which the gateway's coarse
+  `invalidReason` collapses to `transaction_simulation_failed` — a reason the
+  SDK classifies as *recoverable*, so it burned all 5 payment attempts. Each
+  cost the gateway its own 4 verify retries: **20 facilitator calls per doomed
+  request**, which is how one unfunded wallet showed up as a ~260-call storm.
+
+  This is a floor rather than a preference — a pinned older SDK reintroduces
+  the amplification in full. The fix also needs the gateway half
+  (BlockRunAI/blockrun-sol#48) deployed to return the `invalidMessage` the SDK
+  classifies on; against an older gateway the SDK degrades to the previous
+  retry behaviour rather than misbehaving.
+
+  Base-chain users are unaffected, so the base `blockrun-llm` floor is
+  unchanged.
+
 ## 0.6.0 — 2026-07-08
 
 Fixes the two LiteLLM-integration gaps a partner hit with the
