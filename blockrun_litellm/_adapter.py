@@ -425,21 +425,50 @@ def get_image_client(
         return client
 
 
-def _invoke_image_generate(client: Any, prompt: str, *, model, size, n):
+def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=None):
     """Dispatch ``generate`` (Base ImageClient) vs ``image`` (SolanaLLMClient).
 
     ``ImageClient.generate`` and ``SolanaLLMClient.image`` are intentionally
     named differently in the SDK but accept the same call shape.
     """
+    # Omit optional values instead of passing ``None``. This keeps the adapter
+    # compatible with SDK releases from before an optional parameter was added.
+    kwargs: Dict[str, Any] = {"n": n}
+    if model is not None:
+        kwargs["model"] = model
+    if size is not None:
+        kwargs["size"] = size
+    if quality is not None:
+        kwargs["quality"] = quality
     if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
         # SolanaLLMClient.image requires non-None model/size (no class-level defaults).
-        kwargs: Dict[str, Any] = {"n": n}
-        if model is not None:
-            kwargs["model"] = model
-        if size is not None:
-            kwargs["size"] = size
         return client.image(prompt, **kwargs)
-    return client.generate(prompt, model=model, size=size, n=n)
+    return client.generate(prompt, **kwargs)
+
+
+def _invoke_image_edit(
+    client: Any,
+    prompt: str,
+    image: Any,
+    *,
+    model: Optional[str],
+    mask: Optional[str],
+    size: Optional[str],
+    n: int,
+    quality: Optional[str],
+):
+    kwargs: Dict[str, Any] = {"n": n}
+    for key, value in {
+        "model": model,
+        "mask": mask,
+        "size": size,
+        "quality": quality,
+    }.items():
+        if value is not None:
+            kwargs[key] = value
+    if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
+        return client.image_edit(prompt, image, **kwargs)
+    return client.edit(prompt, image, **kwargs)
 
 
 def image_generation_sync(
@@ -448,11 +477,14 @@ def image_generation_sync(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     client = get_image_client(api_url=api_url, private_key=private_key)
-    response = _invoke_image_generate(client, prompt, model=model, size=size, n=n)
+    response = _invoke_image_generate(
+        client, prompt, model=model, size=size, n=n, quality=quality
+    )
     return response.model_dump(exclude_none=True)
 
 
@@ -462,6 +494,7 @@ async def image_generation_async(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -469,7 +502,65 @@ async def image_generation_async(
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
         _image_executor,
-        lambda: _invoke_image_generate(client, prompt, model=model, size=size, n=n),
+        lambda: _invoke_image_generate(
+            client, prompt, model=model, size=size, n=n, quality=quality
+        ),
+    )
+    return response.model_dump(exclude_none=True)
+
+
+def image_edit_sync(
+    prompt: str,
+    image: Any,
+    *,
+    model: Optional[str] = None,
+    mask: Optional[str] = None,
+    size: Optional[str] = None,
+    n: int = 1,
+    quality: Optional[str] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    client = get_image_client(api_url=api_url, private_key=private_key)
+    response = _invoke_image_edit(
+        client,
+        prompt,
+        image,
+        model=model,
+        mask=mask,
+        size=size,
+        n=n,
+        quality=quality,
+    )
+    return response.model_dump(exclude_none=True)
+
+
+async def image_edit_async(
+    prompt: str,
+    image: Any,
+    *,
+    model: Optional[str] = None,
+    mask: Optional[str] = None,
+    size: Optional[str] = None,
+    n: int = 1,
+    quality: Optional[str] = None,
+    api_url: Optional[str] = None,
+    private_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    client = get_image_client(api_url=api_url, private_key=private_key)
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        _image_executor,
+        lambda: _invoke_image_edit(
+            client,
+            prompt,
+            image,
+            model=model,
+            mask=mask,
+            size=size,
+            n=n,
+            quality=quality,
+        ),
     )
     return response.model_dump(exclude_none=True)
 
@@ -584,7 +675,10 @@ VIDEO_PARAM_KEYS = (
     "image_url",
     "last_frame_url",
     "reference_image_urls",
+    "reference_videos",
+    "reference_audios",
     "real_face_asset_id",
+    "input_type",
     "duration_seconds",
     "aspect_ratio",
     "resolution",
@@ -716,6 +810,8 @@ __all__ = [
     "get_image_client",
     "image_generation_sync",
     "image_generation_async",
+    "image_edit_sync",
+    "image_edit_async",
     "get_video_client",
     "get_music_client",
     "get_speech_client",

@@ -23,6 +23,11 @@ import blockrun_litellm.proxy as proxy
 # (route, adapter fn to mock, minimal valid body)
 ROUTES = [
     ("/v1/images/generations", "image_generation_async", {"prompt": "a cat"}),
+    (
+        "/v1/images/edits",
+        "image_edit_async",
+        {"prompt": "make it green", "image": "data:image/png;base64,AA=="},
+    ),
     ("/v1/videos/generations", "video_generation_async", {"prompt": "a cat"}),
     ("/v1/audio/speech", "speech_generation_async", {"input": "hi"}),
     ("/v1/audio/generations", "music_generation_async", {"prompt": "lo-fi"}),
@@ -161,11 +166,59 @@ class TestArgumentForwarding:
                 "seed": None,
                 "junk_key": "ignored",
                 "duration_seconds": 5,
+                "reference_videos": [{"url": "https://example.com/ref.mp4"}],
+                "input_type": "reference",
             },
         )
         kwargs = mock.call_args.kwargs
         assert kwargs["generate_audio"] is False
         assert kwargs["duration_seconds"] == 5
+        assert kwargs["reference_videos"][0]["url"].endswith("ref.mp4")
+        assert kwargs["input_type"] == "reference"
         assert "seed" not in kwargs
         assert "junk_key" not in kwargs
         assert kwargs["model"] is None  # omitted model forwards as None
+
+    def test_image_quality_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/generations",
+            json={
+                "prompt": "a cat",
+                "model": "openai/gpt-image-2",
+                "quality": "high",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] == "high"
+
+    def test_image_edit_json_multi_image_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        images = ["data:image/png;base64,AA==", "data:image/png;base64,AQ=="]
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "combine",
+                "model": "openai/gpt-image-2",
+                "image": images,
+                "quality": "medium",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["image"] == images
+        assert mock.call_args.kwargs["quality"] == "medium"
+
+    def test_image_edit_multipart_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            data={"prompt": "combine", "model": "google/nano-banana"},
+            files=[
+                ("image", ("a.png", b"first", "image/png")),
+                ("image", ("b.png", b"second", "image/png")),
+            ],
+        )
+        assert response.status_code == 200
+        images = mock.call_args.kwargs["image"]
+        assert len(images) == 2
+        assert all(value.startswith("data:image/png;base64,") for value in images)

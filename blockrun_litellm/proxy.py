@@ -728,6 +728,77 @@ async def image_generations(request: Request) -> Any:
             model=model,
             size=body.get("size"),
             n=n,
+            quality=body.get("quality"),
+        ),
+    )
+
+
+async def _image_form_value(value: Any, field: str) -> str:
+    """Convert a multipart image upload (or an existing data URI) to a data URI."""
+    if isinstance(value, str):
+        return value
+    read = getattr(value, "read", None)
+    if read is None:
+        raise HTTPException(400, f"`{field}` must be an image upload or data URI")
+    raw = await read()
+    content_type = getattr(value, "content_type", None) or "application/octet-stream"
+    if not content_type.startswith("image/"):
+        raise HTTPException(400, f"`{field}` must have an image content type")
+    return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+@app.post("/v1/images/edits", dependencies=[Depends(_require_token)])
+@app.post("/v1/images/image2image", dependencies=[Depends(_require_token)])
+async def image_edits(request: Request) -> Any:
+    """OpenAI-compatible image editing, accepting JSON or multipart image[]."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid multipart form: {exc}") from exc
+        prompt = form.get("prompt")
+        values = list(form.getlist("image")) + list(form.getlist("image[]"))
+        if not values:
+            raise HTTPException(400, "`image` is required")
+        images = [await _image_form_value(value, "image") for value in values]
+        image: Any = images[0] if len(images) == 1 else images
+        mask_value = form.get("mask")
+        mask = await _image_form_value(mask_value, "mask") if mask_value is not None else None
+        model = form.get("model")
+        size = form.get("size")
+        quality = form.get("quality")
+        n_raw = form.get("n", 1)
+    else:
+        body = await _json_body(request)
+        prompt = body.get("prompt")
+        image = body.get("image")
+        if image is None:
+            raise HTTPException(400, "`image` is required")
+        mask = body.get("mask")
+        model = body.get("model")
+        size = body.get("size")
+        quality = body.get("quality")
+        n_raw = body.get("n", 1)
+
+    if not prompt:
+        raise HTTPException(400, "`prompt` is required")
+    try:
+        n = int(n_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "`n` must be an integer")
+
+    return await _media_endpoint(
+        request.url.path,
+        model if isinstance(model, str) else None,
+        lambda: _adapter.image_edit_async(
+            prompt=str(prompt),
+            image=image,
+            model=model if isinstance(model, str) else None,
+            mask=mask,
+            size=size if isinstance(size, str) else None,
+            n=n,
+            quality=quality if isinstance(quality, str) else None,
         ),
     )
 

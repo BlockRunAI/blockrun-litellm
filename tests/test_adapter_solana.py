@@ -202,6 +202,87 @@ def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
     }
 
 
+def test_image_generation_forwards_quality(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/img.png"}]}
+
+    class FakeSolanaClient:
+        def image(self, prompt, **kwargs):
+            captured.update(prompt=prompt, **kwargs)
+            return FakeResponse()
+
+    client = FakeSolanaClient()
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    _adapter.image_generation_sync(
+        "a cat",
+        model="openai/gpt-image-2",
+        quality="high",
+        api_url="https://sol.blockrun.ai/api",
+    )
+    assert captured["quality"] == "high"
+
+
+def test_base_image_generation_omits_absent_quality(monkeypatch):
+    """Keep working with SDK releases that predate the optional quality kwarg."""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/img.png"}]}
+
+    class FakeBaseClient:
+        def generate(self, prompt, *, model=None, size=None, n=1):
+            captured.update(prompt=prompt, model=model, size=size, n=n)
+            return FakeResponse()
+
+    client = FakeBaseClient()
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
+
+    _adapter.image_generation_sync("a cat", model="google/nano-banana")
+    assert captured == {
+        "prompt": "a cat",
+        "model": "google/nano-banana",
+        "size": None,
+        "n": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_image_edit_async_dispatches_to_solana(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/edit.png"}]}
+
+    class FakeSolanaClient:
+        def image_edit(self, prompt, image, **kwargs):
+            captured.update(prompt=prompt, image=image, **kwargs)
+            return FakeResponse()
+
+    client = FakeSolanaClient()
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    result = await _adapter.image_edit_async(
+        "make green",
+        ["data:image/png;base64,AA==", "data:image/png;base64,AA=="],
+        model="openai/gpt-image-2",
+        quality="medium",
+        api_url="https://sol.blockrun.ai/api",
+    )
+    assert result["data"][0]["url"] == "https://example/edit.png"
+    assert captured["quality"] == "medium"
+    assert len(captured["image"]) == 2
+
+
 def test_solana_image_client_sets_image_timeout(monkeypatch):
     """get_image_client must raise the SDK's image-request timeout ceiling.
 
