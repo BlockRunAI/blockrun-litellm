@@ -202,34 +202,13 @@ def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
     }
 
 
-def test_image_generation_forwards_quality(monkeypatch):
-    captured: dict[str, Any] = {}
+def test_base_image_generation_omits_none_values(monkeypatch):
+    """Omit unset optionals rather than passing None.
 
-    class FakeResponse:
-        def model_dump(self, exclude_none=True):
-            return {"data": [{"url": "https://example/img.png"}]}
-
-    class FakeSolanaClient:
-        def image(self, prompt, **kwargs):
-            captured.update(prompt=prompt, **kwargs)
-            return FakeResponse()
-
-    client = FakeSolanaClient()
-    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
-    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
-    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
-
-    _adapter.image_generation_sync(
-        "a cat",
-        model="openai/gpt-image-2",
-        quality="high",
-        api_url="https://sol.blockrun.ai/api",
-    )
-    assert captured["quality"] == "high"
-
-
-def test_base_image_generation_omits_absent_quality(monkeypatch):
-    """Keep working with SDK releases that predate the optional quality kwarg."""
+    The SDK image clients have closed signatures — ``ImageClient.generate``
+    raises TypeError on any kwarg it doesn't name — so the adapter must send
+    only what the caller actually set.
+    """
     captured: dict[str, Any] = {}
 
     class FakeResponse:
@@ -275,11 +254,10 @@ async def test_image_edit_async_dispatches_to_solana(monkeypatch):
         "make green",
         ["data:image/png;base64,AA==", "data:image/png;base64,AA=="],
         model="openai/gpt-image-2",
-        quality="medium",
         api_url="https://sol.blockrun.ai/api",
     )
     assert result["data"][0]["url"] == "https://example/edit.png"
-    assert captured["quality"] == "medium"
+    assert captured["model"] == "openai/gpt-image-2"
     assert len(captured["image"]) == 2
 
 

@@ -425,7 +425,7 @@ def get_image_client(
         return client
 
 
-def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=None):
+def _invoke_image_generate(client: Any, prompt: str, *, model, size, n):
     """Dispatch ``generate`` (Base ImageClient) vs ``image`` (SolanaLLMClient).
 
     ``ImageClient.generate`` and ``SolanaLLMClient.image`` are intentionally
@@ -438,8 +438,6 @@ def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=
         kwargs["model"] = model
     if size is not None:
         kwargs["size"] = size
-    if quality is not None:
-        kwargs["quality"] = quality
     if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
         # SolanaLLMClient.image requires non-None model/size (no class-level defaults).
         return client.image(prompt, **kwargs)
@@ -455,14 +453,12 @@ def _invoke_image_edit(
     mask: Optional[str],
     size: Optional[str],
     n: int,
-    quality: Optional[str],
 ):
     kwargs: Dict[str, Any] = {"n": n}
     for key, value in {
         "model": model,
         "mask": mask,
         "size": size,
-        "quality": quality,
     }.items():
         if value is not None:
             kwargs[key] = value
@@ -477,14 +473,11 @@ def image_generation_sync(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
-    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     client = get_image_client(api_url=api_url, private_key=private_key)
-    response = _invoke_image_generate(
-        client, prompt, model=model, size=size, n=n, quality=quality
-    )
+    response = _invoke_image_generate(client, prompt, model=model, size=size, n=n)
     return response.model_dump(exclude_none=True)
 
 
@@ -494,7 +487,6 @@ async def image_generation_async(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
-    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -502,9 +494,7 @@ async def image_generation_async(
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
         _image_executor,
-        lambda: _invoke_image_generate(
-            client, prompt, model=model, size=size, n=n, quality=quality
-        ),
+        lambda: _invoke_image_generate(client, prompt, model=model, size=size, n=n),
     )
     return response.model_dump(exclude_none=True)
 
@@ -517,7 +507,6 @@ def image_edit_sync(
     mask: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
-    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -530,7 +519,6 @@ def image_edit_sync(
         mask=mask,
         size=size,
         n=n,
-        quality=quality,
     )
     return response.model_dump(exclude_none=True)
 
@@ -543,7 +531,6 @@ async def image_edit_async(
     mask: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
-    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -559,7 +546,6 @@ async def image_edit_async(
             mask=mask,
             size=size,
             n=n,
-            quality=quality,
         ),
     )
     return response.model_dump(exclude_none=True)
@@ -675,10 +661,7 @@ VIDEO_PARAM_KEYS = (
     "image_url",
     "last_frame_url",
     "reference_image_urls",
-    "reference_videos",
-    "reference_audios",
     "real_face_asset_id",
-    "input_type",
     "duration_seconds",
     "aspect_ratio",
     "resolution",

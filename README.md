@@ -362,12 +362,12 @@ curl http://localhost:4001/v1/chat/completions \
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
 | `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
-| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`, `quality`. |
-| `POST` | `/v1/images/edits` | OpenAI-compatible image editing. Accepts JSON data URIs or multipart `image`/`image[]`; supports multiple source images, `mask`, and `quality`. `/v1/images/image2image` is an alias. |
+| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
+| `POST` | `/v1/images/edits` | OpenAI-compatible image editing. Accepts JSON data URIs or multipart `image`/`image[]`; supports multiple source images and `mask`. `/v1/images/image2image` is an alias. |
 | `POST` | `/v1/videos` | OpenAI Videos API create (what LiteLLM's video routes call) — returns a job object immediately |
 | `GET`  | `/v1/videos/{id}` | OpenAI Videos API status poll (`queued` → `in_progress` → `completed`/`failed`) |
 | `GET`  | `/v1/videos/{id}/content` | Download the finished clip bytes |
-| `POST` | `/v1/videos/generations` | Native video generation. Supports `duration_seconds`, image/first-last-frame inputs, reference images/video/audio, `input_type`, resolution, aspect ratio, audio, seed, and model-specific parameters. |
+| `POST` | `/v1/videos/generations` | Native video generation. Supports `duration_seconds`, image/first-last-frame inputs, reference images, resolution, aspect ratio, audio, seed, and model-specific parameters. |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible TTS |
 | `POST` | `/v1/audio/generations` | Music generation |
 | `POST` | `/v1/audio/sound-effects` | Cinematic sound effects |

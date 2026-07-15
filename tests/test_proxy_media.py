@@ -166,31 +166,14 @@ class TestArgumentForwarding:
                 "seed": None,
                 "junk_key": "ignored",
                 "duration_seconds": 5,
-                "reference_videos": [{"url": "https://example.com/ref.mp4"}],
-                "input_type": "reference",
             },
         )
         kwargs = mock.call_args.kwargs
         assert kwargs["generate_audio"] is False
         assert kwargs["duration_seconds"] == 5
-        assert kwargs["reference_videos"][0]["url"].endswith("ref.mp4")
-        assert kwargs["input_type"] == "reference"
         assert "seed" not in kwargs
         assert "junk_key" not in kwargs
         assert kwargs["model"] is None  # omitted model forwards as None
-
-    def test_image_quality_forwarded(self, client, monkeypatch):
-        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
-        response = client.post(
-            "/v1/images/generations",
-            json={
-                "prompt": "a cat",
-                "model": "openai/gpt-image-2",
-                "quality": "high",
-            },
-        )
-        assert response.status_code == 200
-        assert mock.call_args.kwargs["quality"] == "high"
 
     def test_image_edit_json_multi_image_forwarded(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
@@ -201,12 +184,11 @@ class TestArgumentForwarding:
                 "prompt": "combine",
                 "model": "openai/gpt-image-2",
                 "image": images,
-                "quality": "medium",
             },
         )
         assert response.status_code == 200
         assert mock.call_args.kwargs["image"] == images
-        assert mock.call_args.kwargs["quality"] == "medium"
+        assert mock.call_args.kwargs["model"] == "openai/gpt-image-2"
 
     def test_image_edit_multipart_forwarded(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))

@@ -728,7 +728,6 @@ async def image_generations(request: Request) -> Any:
             model=model,
             size=body.get("size"),
             n=n,
-            quality=body.get("quality"),
         ),
     )
 
@@ -767,7 +766,6 @@ async def image_edits(request: Request) -> Any:
         mask = await _image_form_value(mask_value, "mask") if mask_value is not None else None
         model = form.get("model")
         size = form.get("size")
-        quality = form.get("quality")
         n_raw = form.get("n", 1)
     else:
         body = await _json_body(request)
@@ -778,7 +776,6 @@ async def image_edits(request: Request) -> Any:
         mask = body.get("mask")
         model = body.get("model")
         size = body.get("size")
-        quality = body.get("quality")
         n_raw = body.get("n", 1)
 
     if not prompt:
@@ -798,7 +795,6 @@ async def image_edits(request: Request) -> Any:
             mask=mask,
             size=size if isinstance(size, str) else None,
             n=n,
-            quality=quality if isinstance(quality, str) else None,
         ),
     )
 

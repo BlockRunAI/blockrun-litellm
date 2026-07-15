@@ -86,23 +86,6 @@ class TestVideoDispatch:
         assert call["duration_seconds"] == 5
 
     @pytest.mark.asyncio
-    async def test_reference_media_and_input_type_forwarded(self, monkeypatch):
-        client = FakeSolanaMediaClient()
-        _route_to(monkeypatch, client, solana=True)
-        videos = [{"url": "https://example.com/ref.mp4", "role": "motion"}]
-        audios = [{"url": "https://example.com/ref.mp3"}]
-        await _adapter.video_generation_async(
-            "follow references",
-            reference_videos=videos,
-            reference_audios=audios,
-            input_type="reference",
-        )
-        (call,) = client.calls
-        assert call["reference_videos"] == videos
-        assert call["reference_audios"] == audios
-        assert call["input_type"] == "reference"
-
-    @pytest.mark.asyncio
     async def test_solana_uses_video_method_and_keeps_timeout(self, monkeypatch):
         client = FakeSolanaMediaClient()
         _route_to(monkeypatch, client, solana=True)
