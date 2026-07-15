@@ -32,6 +32,9 @@ dependencies = [
     # chunks (ChatCompletionChunk.cost_usd) so streaming reports real cost too.
     # Also carries the earlier >=1.4.1 streamed-tool-call parse fix and the
     # Solana ~/.blockrun/.solana-session auto-load.
+    # NB: proactive Seedance settlement re-signing (>=1.5.1) is a SolanaLLMClient
+    # concern, so it is enforced by the [solana] floor below rather than here —
+    # base-chain users don't need it, and [solana] already pulls a newer core.
     "blockrun-llm>=1.4.7",
     "litellm>=1.40.0",
 ]
@@ -43,6 +46,8 @@ dependencies = [
 # blockrun-llm release carrying BlockRunAI/blockrun-llm#16, shipped in 1.5.0
 # (also carries #17 rpc_batch cache fix, #18 solana<0.40 pin, #19 media
 # hardening). Older SDKs degrade Solana media to a clear 501, not a 500.
+# >=1.5.1 adds proactive video settlement re-signing (#22); 1.5.0 can exhaust
+# its two reactive retries on Seedance 2.0/2.0-fast and surface a payment_error.
 # >=1.6.1: fails fast when the payer has no USDC token account
 # (BlockRunAI/blockrun-llm#23). Below this floor a wallet that can never pay
 # burns all 5 payment retries, each costing the gateway 4 verify retries — 20
