@@ -425,11 +425,29 @@ def get_image_client(
         return client
 
 
-def _invoke_image_generate(client: Any, prompt: str, *, model, size, n):
+def _is_solana_image_client(client: Any) -> bool:
+    return _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient)
+
+
+# `quality` exists only on the Solana image surface: the Base gateway defines no
+# such field and strips unknown keys, so a value routed there would be silently
+# dropped and the caller would never learn their latency knob did nothing. The
+# SDK's ImageClient rejects it for the same reason. Rather than let that surface
+# as a 500 TypeError, refuse it here — _media_endpoint turns ValueError into a
+# 400 that names the constraint.
+_QUALITY_ON_BASE_ERROR = (
+    "`quality` is only supported on Solana (BLOCKRUN_CHAIN=solana). The Base "
+    "gateway has no quality field and would ignore it — omit the parameter, or "
+    "route this request to Solana."
+)
+
+
+def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=None):
     """Dispatch ``generate`` (Base ImageClient) vs ``image`` (SolanaLLMClient).
 
     ``ImageClient.generate`` and ``SolanaLLMClient.image`` are intentionally
-    named differently in the SDK but accept the same call shape.
+    named differently in the SDK but accept the same call shape, except for
+    ``quality`` — Solana only, see :data:`_QUALITY_ON_BASE_ERROR`.
     """
     # Omit optional values instead of passing ``None``. This keeps the adapter
     # compatible with SDK releases from before an optional parameter was added.
@@ -438,9 +456,13 @@ def _invoke_image_generate(client: Any, prompt: str, *, model, size, n):
         kwargs["model"] = model
     if size is not None:
         kwargs["size"] = size
-    if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
+    if _is_solana_image_client(client):
+        if quality is not None:
+            kwargs["quality"] = quality
         # SolanaLLMClient.image requires non-None model/size (no class-level defaults).
         return client.image(prompt, **kwargs)
+    if quality is not None:
+        raise ValueError(_QUALITY_ON_BASE_ERROR)
     return client.generate(prompt, **kwargs)
 
 
@@ -453,6 +475,7 @@ def _invoke_image_edit(
     mask: Optional[str],
     size: Optional[str],
     n: int,
+    quality: Optional[str] = None,
 ):
     kwargs: Dict[str, Any] = {"n": n}
     for key, value in {
@@ -462,8 +485,12 @@ def _invoke_image_edit(
     }.items():
         if value is not None:
             kwargs[key] = value
-    if _HAS_SOLANA and SolanaLLMClient is not None and isinstance(client, SolanaLLMClient):
+    if _is_solana_image_client(client):
+        if quality is not None:
+            kwargs["quality"] = quality
         return client.image_edit(prompt, image, **kwargs)
+    if quality is not None:
+        raise ValueError(_QUALITY_ON_BASE_ERROR)
     return client.edit(prompt, image, **kwargs)
 
 
@@ -473,11 +500,14 @@ def image_generation_sync(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     client = get_image_client(api_url=api_url, private_key=private_key)
-    response = _invoke_image_generate(client, prompt, model=model, size=size, n=n)
+    response = _invoke_image_generate(
+        client, prompt, model=model, size=size, n=n, quality=quality
+    )
     return response.model_dump(exclude_none=True)
 
 
@@ -487,6 +517,7 @@ async def image_generation_async(
     model: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -494,7 +525,9 @@ async def image_generation_async(
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
         _image_executor,
-        lambda: _invoke_image_generate(client, prompt, model=model, size=size, n=n),
+        lambda: _invoke_image_generate(
+            client, prompt, model=model, size=size, n=n, quality=quality
+        ),
     )
     return response.model_dump(exclude_none=True)
 
@@ -507,6 +540,7 @@ def image_edit_sync(
     mask: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -519,6 +553,7 @@ def image_edit_sync(
         mask=mask,
         size=size,
         n=n,
+        quality=quality,
     )
     return response.model_dump(exclude_none=True)
 
@@ -531,6 +566,7 @@ async def image_edit_async(
     mask: Optional[str] = None,
     size: Optional[str] = None,
     n: int = 1,
+    quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -546,6 +582,7 @@ async def image_edit_async(
             mask=mask,
             size=size,
             n=n,
+            quality=quality,
         ),
     )
     return response.model_dump(exclude_none=True)
@@ -662,6 +699,10 @@ VIDEO_PARAM_KEYS = (
     "last_frame_url",
     "reference_image_urls",
     "real_face_asset_id",
+    # Declared seed mode, cross-checked by the gateway against the seed fields
+    # above (400, unbilled, on disagreement). Needs blockrun-llm >=1.7.0 on both
+    # chains — see the floor in pyproject.toml.
+    "input_type",
     "duration_seconds",
     "aspect_ratio",
     "resolution",

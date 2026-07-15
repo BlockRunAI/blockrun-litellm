@@ -175,6 +175,41 @@ class TestArgumentForwarding:
         assert "junk_key" not in kwargs
         assert kwargs["model"] is None  # omitted model forwards as None
 
+    def test_video_input_type_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "video_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/videos/generations",
+            json={
+                "prompt": "the portrait turns",
+                "image_url": "https://example.com/a.jpg",
+                "input_type": "image",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["input_type"] == "image"
+
+    def test_image_quality_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/generations",
+            json={"prompt": "a cat", "model": "openai/gpt-image-2", "quality": "low"},
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] == "low"
+
+    def test_image_edit_quality_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "make it green",
+                "image": "data:image/png;base64,AA==",
+                "quality": "high",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] == "high"
+
     def test_image_edit_json_multi_image_forwarded(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
         images = ["data:image/png;base64,AA==", "data:image/png;base64,AQ=="]

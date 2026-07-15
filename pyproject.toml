@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.6.1"
+version = "0.7.0"
 description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
 readme = "README.md"
 license = "MIT"
@@ -35,7 +35,12 @@ dependencies = [
     # NB: proactive Seedance settlement re-signing (>=1.5.1) is a SolanaLLMClient
     # concern, so it is enforced by the [solana] floor below rather than here —
     # base-chain users don't need it, and [solana] already pulls a newer core.
-    "blockrun-llm>=1.4.7",
+    # >=1.7.0: `input_type` on VideoClient.generate (BlockRunAI/blockrun-llm#24).
+    # Unlike the re-signing note above this IS a base-chain concern — the Base
+    # gateway accepts input_type and VIDEO_PARAM_KEYS forwards it on both chains,
+    # and VideoClient.generate has a closed signature, so an older core raises
+    # TypeError the first time a caller sends it.
+    "blockrun-llm>=1.7.0",
     "litellm>=1.40.0",
 ]
 
@@ -55,7 +60,11 @@ dependencies = [
 # amplification is what turned one unfunded wallet into a ~260-call storm, and
 # a pinned older SDK reintroduces it in full. Base-chain users are unaffected,
 # so the base floor deliberately stays where it is.
-solana = ["blockrun-llm[solana]>=1.6.1"]
+# >=1.7.0: `quality` on SolanaLLMClient.image/image_edit (#24). Solana-only —
+# the Base gateway has no quality field, so the adapter 400s rather than let it
+# be silently dropped. Tracks the base floor here only because both landed in
+# the same release.
+solana = ["blockrun-llm[solana]>=1.7.0"]
 proxy = [
     "fastapi>=0.110.0",
     "python-multipart>=0.0.9",

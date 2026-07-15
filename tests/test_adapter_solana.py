@@ -309,3 +309,67 @@ def test_solana_image_timeout_env_override(monkeypatch):
     _adapter.get_image_client(api_url="https://sol.blockrun.ai/api", private_key="bogus")
 
     assert captured["image_timeout"] == 420.0
+
+
+# --- quality is Solana-only -------------------------------------------------
+# The Base gateway defines no quality field and strips unknown keys, so a value
+# routed there would vanish silently. The adapter refuses instead; _media_endpoint
+# turns the ValueError into a 400 naming the constraint.
+
+
+def test_base_image_generation_rejects_quality(monkeypatch):
+    class FakeBaseClient:
+        def generate(self, prompt, *, model=None, size=None, n=1):
+            raise AssertionError("must not reach the SDK")
+
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: FakeBaseClient())
+    with pytest.raises(ValueError, match="only supported on Solana"):
+        _adapter.image_generation_sync("a cat", quality="low")
+
+
+def test_base_image_edit_rejects_quality(monkeypatch):
+    class FakeBaseClient:
+        def edit(self, prompt, image, **kwargs):
+            raise AssertionError("must not reach the SDK")
+
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: FakeBaseClient())
+    with pytest.raises(ValueError, match="only supported on Solana"):
+        _adapter.image_edit_sync("green", "data:image/png;base64,AA==", quality="low")
+
+
+def test_base_image_generation_unaffected_when_quality_absent(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/img.png"}]}
+
+    class FakeBaseClient:
+        def generate(self, prompt, *, model=None, size=None, n=1):
+            captured.update(prompt=prompt, model=model)
+            return FakeResponse()
+
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: FakeBaseClient())
+    _adapter.image_generation_sync("a cat", model="google/nano-banana")
+    assert captured["model"] == "google/nano-banana"
+
+
+def test_solana_image_generation_forwards_quality(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def model_dump(self, exclude_none=True):
+            return {"data": [{"url": "https://example/img.png"}]}
+
+    class FakeSolanaClient:
+        def image(self, prompt, *, model=None, size=None, n=1, quality=None):
+            captured.update(prompt=prompt, quality=quality)
+            return FakeResponse()
+
+    client = FakeSolanaClient()
+    monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
+    monkeypatch.setattr(_adapter, "SolanaLLMClient", FakeSolanaClient)
+    monkeypatch.setattr(_adapter, "_HAS_SOLANA", True)
+
+    _adapter.image_generation_sync("a cat", model="openai/gpt-image-2", quality="low")
+    assert captured["quality"] == "low"

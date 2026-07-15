@@ -87,3 +87,31 @@ class TestImageParamContract:
         accepted = _accepted(_solana_client().image_edit)
         if accepted is not None:
             assert {"prompt", "image", "model", "mask", "size", "n"} <= accepted
+
+    def test_solana_image_accepts_quality(self):
+        """`quality` is forwarded on the Solana branch only — it must exist there."""
+        accepted = _accepted(_solana_client().image)
+        if accepted is not None:
+            assert "quality" in accepted
+
+    def test_solana_image_edit_accepts_quality(self):
+        accepted = _accepted(_solana_client().image_edit)
+        if accepted is not None:
+            assert "quality" in accepted
+
+    def test_base_image_client_still_rejects_quality(self):
+        """The asymmetry is load-bearing, not an oversight.
+
+        The Base gateway has no quality field and strips unknown keys, so a
+        value routed there would be silently dropped. The SDK rejects it on
+        purpose, and the adapter 400s before reaching it. If a future SDK adds
+        quality to ImageClient, this test should fail loudly so the adapter's
+        Base-branch guard gets revisited rather than left stale.
+        """
+        for method in (blockrun_image.ImageClient.generate, blockrun_image.ImageClient.edit):
+            accepted = _accepted(method)
+            # ImageClient takes **kwargs and rejects unknown ones at runtime,
+            # so a None here means "no explicit quality param" — the state we
+            # expect. A named quality param would mean Base gained support.
+            if accepted is not None:
+                assert "quality" not in accepted
