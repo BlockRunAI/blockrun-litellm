@@ -787,6 +787,38 @@ def _require_optional_str(value: Any, field: str) -> Optional[str]:
     raise HTTPException(400, f"`{field}` must be a string")
 
 
+def _require_named_model(value: Any) -> Optional[str]:
+    """Absent → None (the gateway default applies); present-but-blank → 400.
+
+    `_require_optional_str` folds a blank string into "not set", which is right
+    for a field the caller may legitimately omit. `model` on the media routes is
+    the exception, because "not set" is not free here: the SDK coalesces with
+    `model or DEFAULT_MODEL`, so a blank string is falsy, silently becomes the
+    default model, and **bills for it** — ~$0.40 for the 8s Grok video default.
+
+    The gateway can't catch this on our behalf: its schema is
+    `z.string().default(...)`, and a zod default only fires when the key is
+    *absent*. `""` is a present, valid string, so it sails through — and by then
+    the SDK has already substituted the default anyway.
+
+    Omitting `model` still opts into the default; that stays documented and
+    free. Sending an empty one is a caller bug — it's what a client templating an
+    unset variable emits — so it now says so instead of quietly charging for a
+    model nobody named.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(400, "`model` must be a string")
+    if not value.strip():
+        raise HTTPException(
+            400,
+            "`model` must not be empty — omit the field entirely to use the "
+            "gateway's default model, which is a billed generation either way",
+        )
+    return value
+
+
 def _require_image_n(value: Any) -> int:
     """Bound `n` locally, before it can cost anything.
 
@@ -1009,7 +1041,7 @@ async def video_generations(request: Request) -> Any:
         raise HTTPException(400, "`prompt` is required")
 
     params = {k: body[k] for k in _adapter.VIDEO_PARAM_KEYS if body.get(k) is not None}
-    model: Optional[str] = body.get("model")
+    model = _require_named_model(body.get("model"))
     return await _media_endpoint(
         "/v1/videos/generations",
         model,
@@ -1193,7 +1225,7 @@ async def openai_videos_create(request: Request) -> Any:
         "id": f"video_{uuid.uuid4().hex}",
         "status": "queued",
         "created_at": time.time(),
-        "model": body.get("model"),
+        "model": _require_named_model(body.get("model")),
         "seconds": body.get("seconds"),
         "size": body.get("size"),
         "result": None,
@@ -1265,7 +1297,7 @@ async def audio_speech(request: Request) -> Any:
     if not text:
         raise HTTPException(400, "`input` is required")
 
-    model: Optional[str] = body.get("model")
+    model = _require_named_model(body.get("model"))
     return await _media_endpoint(
         "/v1/audio/speech",
         model,
@@ -1290,7 +1322,7 @@ async def audio_generations(request: Request) -> Any:
     if not prompt:
         raise HTTPException(400, "`prompt` is required")
 
-    model: Optional[str] = body.get("model")
+    model = _require_named_model(body.get("model"))
     return await _media_endpoint(
         "/v1/audio/generations",
         model,
@@ -1314,7 +1346,7 @@ async def audio_sound_effects(request: Request) -> Any:
     if not text:
         raise HTTPException(400, "`text` is required")
 
-    model: Optional[str] = body.get("model")
+    model = _require_named_model(body.get("model"))
     return await _media_endpoint(
         "/v1/audio/sound-effects",
         model,

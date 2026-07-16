@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.3 — 2026-07-16
+
+### Fixed
+
+- **A blank `model` no longer bills a default generation** (#21). The media
+  routes read `model` straight off the body, and the SDK coalesces with
+  `model or DEFAULT_MODEL` — so `{"model": ""}`, which is what a client
+  templating an unset variable sends, is falsy, silently became the default
+  model, and **charged for it** (~$0.40 for the 8s Grok video default). The
+  gateway can't catch it: its schema is `z.string().default(...)`, and a zod
+  default only fires when the key is *absent*, so a present-but-empty string
+  sails through. `/v1/videos/generations`, `/v1/videos`, `/v1/audio/speech`,
+  `/v1/audio/generations`, and `/v1/audio/sound-effects` now refuse it with a
+  400 before dispatch. Omitting `model` still opts into the default and is
+  unchanged. The image routes keep 0.7.2's `_optional_str` semantics (blank →
+  unset → default) and are untouched here; that inconsistency is deliberate for
+  now rather than an oversight.
+
+### Added
+
+- **`grok-imagine-video` joins the bare-id bridge** (#20 follow-up). 0.7.1
+  namespaced short Seedance ids but left the other family behind, so a bare
+  `grok-imagine-video` still 400'd. Bare ids are also whitespace-trimmed now.
+  `sora-2` is deliberately **not** mapped: the catalog ships it under two
+  vendors (`azure/sora-2`, available; `openai/sora-2`, not), so there is no
+  namespace to infer — guessing would pick a vendor for the caller, and the
+  guess would flip meaning the day availability does. It reaches the gateway
+  bare and 400s with the real list, which beats a confident wrong answer.
+
 ## 0.7.2 — 2026-07-16
 
 Post-merge audit of 0.7.0 (three independent reviews of the shipped code). One

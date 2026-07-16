@@ -34,6 +34,11 @@ ROUTES = [
     ("/v1/audio/sound-effects", "sound_effect_async", {"text": "boom"}),
 ]
 
+# The image routes deliberately keep `_optional_str` semantics for `model`
+# (blank → unset → gateway default). Only the routes below treat a blank `model`
+# as a caller bug — see `_require_named_model`.
+MODEL_NAMED_ROUTES = [r for r in ROUTES if not r[0].startswith("/v1/images/")]
+
 OK_RESULT: Dict[str, Any] = {
     "created": 1_700_000_000,
     "model": "stub-model",
@@ -72,6 +77,33 @@ class TestValidation:
         r = client.post("/v1/images/generations", json={"prompt": "a cat", "n": "lots"})
         assert r.status_code == 400
         assert "`n` must be an integer" in r.json()["detail"]
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_model_400_and_never_dispatched(self, client, monkeypatch, route, fn, body, blank):
+        # The money assertion is `assert_not_awaited`: a blank model is falsy, so
+        # the SDK's `model or DEFAULT_MODEL` would silently bill the default.
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json={**body, "model": blank})
+        assert r.status_code == 400
+        assert "`model` must not be empty" in r.json()["detail"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    def test_non_string_model_400_and_never_dispatched(self, client, monkeypatch, route, fn, body):
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json={**body, "model": 123})
+        assert r.status_code == 400
+        assert "`model` must be a string" in r.json()["detail"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    def test_omitted_model_still_opts_into_the_default(self, client, monkeypatch, route, fn, body):
+        # Omitting `model` stays documented and free — only a *blank* one is a bug.
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json=body)
+        assert r.status_code == 200
+        assert mock.await_args.kwargs["model"] is None
 
 
 class TestSuccess:
