@@ -53,9 +53,13 @@ def _canonical_video_model(model: Optional[str]) -> Optional[str]:
     Token360 documents ``seedance-2.0-fast`` while BlockRun's gateway catalog
     uses canonical provider-qualified ids.  The proxy must bridge that naming
     difference before calling the SDK's flat ``/videos/generations`` surface.
+
+    The id is lowercased on the way through: the catalog lookup is an exact
+    ``==`` match, so a case-preserved ``bytedance/Seedance-2.0-Fast`` would 400
+    just like the bare id it replaced.
     """
     if isinstance(model, str) and model.lower().startswith("seedance-"):
-        return f"bytedance/{model}"
+        return f"bytedance/{model.lower()}"
     return model
 
 

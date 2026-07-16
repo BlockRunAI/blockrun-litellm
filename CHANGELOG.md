@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1 — 2026-07-16
+
+### Fixed
+
+- **Short Seedance model ids now reach the gateway namespaced** (#20).
+  Token360 documents `seedance-2.0-fast`, but the gateway's video catalog is an
+  exact-match allowlist of provider-qualified ids (`getVideoModel` does
+  `m.id === modelId`), so a bare id returned 400 "Unknown video model" — before
+  payment, but also before generating anything. The gateway *does* rewrite bare
+  ids to namespaced ones, yet only in `normalizeContentToFlat`, which is wired
+  to the `content[]` route `/v1/videos` and never to the flat
+  `/v1/videos/generations` the SDK posts to; the SDK doesn't normalize either.
+  `_adapter.video_generation_async` now bridges it for both proxy video routes,
+  mirroring the gateway's own `seedance-*` → `bytedance/seedance-*` rule. The id
+  is lowercased on the way through, since the catalog match is case-sensitive.
+
 ## 0.7.0 — 2026-07-15
 
 ### Added

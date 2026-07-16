@@ -81,6 +81,33 @@ class TestVideoDispatch:
         assert call["model"] == "bytedance/seedance-2.0-fast"
 
     @pytest.mark.asyncio
+    async def test_bare_seedance_model_is_canonicalized_for_base(self, monkeypatch):
+        # Canonicalization runs above the chain split, so Base gets it too —
+        # both catalogs name Seedance the same way.
+        client = FakeBaseVideoClient()
+        _route_to(monkeypatch, client, solana=False)
+        await _adapter.video_generation_async("a cat", model="seedance-2.0-fast")
+        (call,) = client.calls
+        assert call["model"] == "bytedance/seedance-2.0-fast"
+
+    @pytest.mark.asyncio
+    async def test_mixed_case_seedance_model_is_lowercased(self, monkeypatch):
+        # The catalog lookup is an exact match, so prefixing alone isn't enough.
+        client = FakeSolanaMediaClient()
+        _route_to(monkeypatch, client, solana=True)
+        await _adapter.video_generation_async("a cat", model="Seedance-2.0-Fast")
+        (call,) = client.calls
+        assert call["model"] == "bytedance/seedance-2.0-fast"
+
+    @pytest.mark.asyncio
+    async def test_non_seedance_model_passes_through_untouched(self, monkeypatch):
+        client = FakeBaseVideoClient()
+        _route_to(monkeypatch, client, solana=False)
+        await _adapter.video_generation_async("a cat", model="xai/grok-imagine-video")
+        (call,) = client.calls
+        assert call["model"] == "xai/grok-imagine-video"
+
+    @pytest.mark.asyncio
     async def test_base_strips_timeout_and_drops_none(self, monkeypatch):
         client = FakeBaseVideoClient()
         _route_to(monkeypatch, client, solana=False)
