@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.4 — 2026-07-16
+
+Documentation only — runtime code is byte-identical to 0.7.3. Released so the
+corrected record ships with the package rather than sitting unreleased on main.
+
+### Fixed
+
+- **Corrected a false claim in the 0.7.2 changelog.** It said an out-of-range
+  `n` "took payment, then 400'd at the provider and lost the prepaid USDC".
+  BlockRun's gateways settle **on success** — `settlePaymentWithRetry` runs
+  after the upstream call — so a request that dies at the provider settles
+  nothing and costs the caller nothing. Verified on every path, including the
+  async one: the poll endpoint answers `payment_status: "not_charged"` with
+  "Upstream generation failed. No payment was taken." for failed jobs.
+
+  The `n` bound stays — it saves a pointless signed round-trip, a facilitator
+  verify, and an upstream call, and answers 400 locally — it was just never
+  about losing money. A changelog that cries wolf about funds is worse than one
+  that says nothing.
+
+  The mistake came from the SDK's `"API error after payment"` wording, which
+  reads as *funds gone* on failures that took nothing; it has now misled two
+  reviewers and this changelog. Fixed upstream in blockrun-llm#25, which reports
+  whether settlement actually happened.
+
 ## 0.7.3 — 2026-07-16
 
 ### Fixed
