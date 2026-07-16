@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import os
 import threading
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
@@ -45,6 +46,8 @@ except ImportError:
 # Default endpoints — used to decide chain when no explicit api_url is given.
 SOLANA_API_URL = "https://sol.blockrun.ai/api"
 BASE_API_URL = "https://blockrun.ai/api"
+
+_log = logging.getLogger(__name__)
 
 
 def _canonical_video_model(model: Optional[str]) -> Optional[str]:
@@ -446,15 +449,23 @@ def _is_solana_image_client(client: Any) -> bool:
 
 
 # `quality` exists only on the Solana image surface: the Base gateway defines no
-# such field and strips unknown keys, so a value routed there would be silently
-# dropped and the caller would never learn their latency knob did nothing. The
-# SDK's ImageClient rejects it for the same reason. Rather than let that surface
-# as a 500 TypeError, refuse it here — _media_endpoint turns ValueError into a
-# 400 that names the constraint.
-_QUALITY_ON_BASE_ERROR = (
-    "`quality` is only supported on Solana (BLOCKRUN_CHAIN=solana). The Base "
-    "gateway has no quality field and would ignore it — omit the parameter, or "
-    "route this request to Solana."
+# such field and strips unknown keys, and the SDK's ImageClient raises TypeError
+# on it rather than forward it.
+#
+# 0.7.0 refused it on Base with a 400. That was wrong: 0.6.1 never read `quality`
+# at all, so callers using it got a 200 — and `quality` is a first-class OpenAI
+# Images parameter on a route documented as DALL-E compatible. Turning a
+# previously-working, spec-compliant request into a hard failure is a breaking
+# change, not something to slip into a minor bump as a side effect of adding
+# Solana support.
+#
+# So: drop it on Base, as 0.6.1 effectively did, but say so — a warning log plus
+# an `x-blockrun-warning` response header, so the value doesn't vanish in silence
+# the way it used to.
+_QUALITY_UNSUPPORTED_ON_BASE = (
+    "`quality` is supported on Solana only (openai/gpt-image-* via "
+    "sol.blockrun.ai) and was ignored: the Base gateway has no quality field. "
+    "Point BLOCKRUN_API_URL at the Solana gateway to use it."
 )
 
 
@@ -463,7 +474,7 @@ def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=
 
     ``ImageClient.generate`` and ``SolanaLLMClient.image`` are intentionally
     named differently in the SDK but accept the same call shape, except for
-    ``quality`` — Solana only, see :data:`_QUALITY_ON_BASE_ERROR`.
+    ``quality`` — Solana only, see :data:`_QUALITY_UNSUPPORTED_ON_BASE`.
     """
     # Omit optional values instead of passing ``None``. This keeps the adapter
     # compatible with SDK releases from before an optional parameter was added.
@@ -478,7 +489,7 @@ def _invoke_image_generate(client: Any, prompt: str, *, model, size, n, quality=
         # SolanaLLMClient.image requires non-None model/size (no class-level defaults).
         return client.image(prompt, **kwargs)
     if quality is not None:
-        raise ValueError(_QUALITY_ON_BASE_ERROR)
+        _log.warning(_QUALITY_UNSUPPORTED_ON_BASE)
     return client.generate(prompt, **kwargs)
 
 
@@ -506,7 +517,7 @@ def _invoke_image_edit(
             kwargs["quality"] = quality
         return client.image_edit(prompt, image, **kwargs)
     if quality is not None:
-        raise ValueError(_QUALITY_ON_BASE_ERROR)
+        _log.warning(_QUALITY_UNSUPPORTED_ON_BASE)
     return client.edit(prompt, image, **kwargs)
 
 
