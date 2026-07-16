@@ -688,6 +688,51 @@ def _media_settlement(result: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _settlement_status(
+    http_status: int, settlement: Optional[Dict[str, Any]], *, failed_after_settlement: bool
+) -> Optional[str]:
+    """Was this failure free, or might it have cost money? Returns None or "unknown".
+
+    ``cost_usd=None`` cannot answer that on its own — it reads as "$0" and is
+    also what we log when we simply don't know. A ledger that quietly under-
+    reports spend is worse than one that admits a gap, so say which it is.
+
+    Whether a failed paid call settles is decided by the gateway, and the
+    gateways differ:
+
+    * **Base** settles only after a successful upstream call, so a failure
+      settles nothing. Nothing to flag.
+    * **Solana** settles *optimistically* on several routes (chat, search, both
+      image routes, music): settle fires in parallel with the upstream work, so
+      a call that verifies and then fails upstream **is charged** — and its
+      error response carries no settlement header, so absence of proof and
+      having-been-charged co-occur exactly when it matters.
+
+    ``failed_after_settlement`` covers the case that bites on *both* chains: the
+    gateway settled, returned 200, and the SDK could not parse the body. The
+    money moved regardless of chain.
+
+    Deliberately a one-bit chain check rather than a per-route table of which
+    Solana endpoints settle optimistically. That table lives in the gateway and
+    would drift here; and the asymmetry of being wrong is stark — a false
+    "unknown" costs someone a glance at the ledger, a false "$0" loses a real
+    charge. Solana's video route settles on the completed poll and so will
+    occasionally be flagged for nothing. That is the trade, taken on purpose.
+    """
+    if settlement and settlement.get("tx_hash"):
+        return None  # proven settled — the row carries the tx hash itself
+    if http_status < 400:
+        return None
+    if failed_after_settlement:
+        return "unknown"  # settle already ran; only the parse failed
+    # A 4xx is the gateway refusing the request (validation, policy, payment
+    # rejected) — those answer before settle on either chain. 5xx means it got
+    # far enough upstream to fail there, which is the optimistic-settle window.
+    if http_status >= 500 and _adapter._is_solana_url(None):
+        return "unknown"
+    return None
+
+
 async def _media_endpoint(
     path: str, model: Optional[str], call: Any, *, warning: Optional[str] = None
 ) -> Any:
@@ -718,11 +763,13 @@ async def _media_endpoint(
     _t0 = time.monotonic()
     req_id = uuid.uuid4().hex
     result: Optional[Dict[str, Any]] = None
+    reached_gateway_paid = False  # did this get far enough to possibly settle?
     async with _get_media_semaphore():
         try:
             result = await call()
             status, payload = 200, result
         except ValidationError as exc:
+            reached_gateway_paid = True  # parse failed *after* settlement
             status = 502
             payload = {
                 "error": "Upstream returned a response the SDK could not parse. "
@@ -746,6 +793,9 @@ async def _media_endpoint(
         settlement=settlement,
         latency_ms=(time.monotonic() - _t0) * 1000.0,
         request_id=req_id,
+        settlement_status=_settlement_status(
+            status, settlement, failed_after_settlement=reached_gateway_paid
+        ),
     )
     headers = _cost_response_headers(None, settlement)
     if warning:
