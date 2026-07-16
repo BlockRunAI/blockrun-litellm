@@ -73,6 +73,14 @@ def _route_to(monkeypatch: pytest.MonkeyPatch, client: Any, *, solana: bool) -> 
 
 class TestVideoDispatch:
     @pytest.mark.asyncio
+    async def test_bare_seedance_model_is_canonicalized_for_solana(self, monkeypatch):
+        client = FakeSolanaMediaClient()
+        _route_to(monkeypatch, client, solana=True)
+        await _adapter.video_generation_async("a cat", model="seedance-2.0-fast")
+        (call,) = client.calls
+        assert call["model"] == "bytedance/seedance-2.0-fast"
+
+    @pytest.mark.asyncio
     async def test_base_strips_timeout_and_drops_none(self, monkeypatch):
         client = FakeBaseVideoClient()
         _route_to(monkeypatch, client, solana=False)
