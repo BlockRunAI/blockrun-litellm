@@ -375,11 +375,24 @@ curl http://localhost:4001/v1/chat/completions \
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
 
+#### Image request limits
+
+`n` is bounded to **1–10** locally. The Base `image2image` gateway schema has no
+bound, so an out-of-range `n` would pass validation, take payment, and only then
+fail at the provider — losing the prepaid USDC.
+
+Multipart uploads are capped by `BLOCKRUN_MAX_IMAGE_BYTES` (default 12MB → 413)
+and `BLOCKRUN_MAX_IMAGE_PARTS` (default 4 → 400; 4 is the most any model
+accepts). Blank optional fields (`quality=`, `size=`, `model=`, `mask=`, `n=`)
+mean "not set", matching what the gateway's own multipart handler does.
+
 #### `quality` and `input_type` (requires `blockrun-llm>=1.7.0`)
 
 **`quality`** (`low`/`medium`/`high`/`auto`, `openai/gpt-image-*`) is **Solana
-only**. The Base gateway defines no such field and would silently ignore it, so
-sending `quality` on Base returns **400** rather than quietly doing nothing.
+only** — the Base gateway defines no such field. Sending it on Base still
+returns **200** and generates the image, but the parameter is ignored and the
+response carries an `x-blockrun-warning` header saying so (a warning is also
+logged). Point `BLOCKRUN_API_URL` at the Solana gateway to make it take effect.
 
 **`input_type`** (`text`/`image`/`first_last_frame`/`reference`) declares the
 seed mode you intend on `/v1/videos/generations`. The gateway infers the mode

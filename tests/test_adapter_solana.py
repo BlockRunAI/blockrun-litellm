@@ -308,30 +308,52 @@ def test_solana_image_timeout_env_override(monkeypatch):
     assert captured["image_timeout"] == 420.0
 
 
+class _FakeImageResponse:
+    def model_dump(self, exclude_none=True):
+        return {"data": [{"url": "https://example/img.png"}]}
+
+
 # --- quality is Solana-only -------------------------------------------------
-# The Base gateway defines no quality field and strips unknown keys, so a value
-# routed there would vanish silently. The adapter refuses instead; _media_endpoint
-# turns the ValueError into a 400 naming the constraint.
+# The Base gateway has no quality field, and ImageClient raises TypeError on it,
+# so it must not be forwarded there. 0.7.0 refused the request outright; that
+# broke Base callers who sent a standard OpenAI param and got a 200 on 0.6.1.
+# The param is dropped now — but loudly (warning log + x-blockrun-warning), so
+# it doesn't vanish the way it silently did before.
 
 
-def test_base_image_generation_rejects_quality(monkeypatch):
+def test_base_image_generation_drops_quality_and_warns(monkeypatch, caplog):
+    """Serve the request; do NOT forward quality; say that we ignored it."""
+    captured = {}
+
     class FakeBaseClient:
-        def generate(self, prompt, *, model=None, size=None, n=1):
-            raise AssertionError("must not reach the SDK")
+        def generate(self, prompt, **kwargs):
+            captured.update(kwargs)
+            return _FakeImageResponse()
 
     monkeypatch.setattr(_adapter, "get_image_client", lambda **_: FakeBaseClient())
-    with pytest.raises(ValueError, match="only supported on Solana"):
-        _adapter.image_generation_sync("a cat", quality="low")
+    with caplog.at_level("WARNING", logger="blockrun_litellm._adapter"):
+        out = _adapter.image_generation_sync("a cat", quality="low")
+
+    assert out["data"][0]["url"]  # request still served, as on 0.6.1
+    assert "quality" not in captured  # never reaches ImageClient -> no TypeError
+    assert "Solana only" in caplog.text
 
 
-def test_base_image_edit_rejects_quality(monkeypatch):
+def test_base_image_edit_drops_quality_and_warns(monkeypatch, caplog):
+    captured = {}
+
     class FakeBaseClient:
         def edit(self, prompt, image, **kwargs):
-            raise AssertionError("must not reach the SDK")
+            captured.update(kwargs)
+            return _FakeImageResponse()
 
     monkeypatch.setattr(_adapter, "get_image_client", lambda **_: FakeBaseClient())
-    with pytest.raises(ValueError, match="only supported on Solana"):
-        _adapter.image_edit_sync("green", "data:image/png;base64,AA==", quality="low")
+    with caplog.at_level("WARNING", logger="blockrun_litellm._adapter"):
+        out = _adapter.image_edit_sync("green", "data:image/png;base64,AA==", quality="low")
+
+    assert out["data"][0]["url"]
+    assert "quality" not in captured
+    assert "Solana only" in caplog.text
 
 
 def test_base_image_generation_unaffected_when_quality_absent(monkeypatch):

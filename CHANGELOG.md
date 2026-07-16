@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.7.2 — 2026-07-16
+
+Post-merge audit of 0.7.0 (three independent reviews of the shipped code). One
+regression, two ways to bill a caller for something they didn't ask for, and a
+test that couldn't fail.
+
+### Fixed
+
+- **Regression: `quality` on Base no longer 400s.** 0.6.1 never read `quality`,
+  so a Base caller sending it got a 200; 0.7.0 read it and refused the request.
+  `quality` is a first-class OpenAI Images parameter on a route documented as
+  DALL-E compatible, so that turned working, spec-compliant code into a hard
+  failure — an announced change at best, not a minor-bump side effect.
+
+  It is dropped again on Base, but no longer in silence: a warning is logged and
+  the response carries `x-blockrun-warning`. The original concern (a paid-for
+  latency knob vanishing unnoticed) is answered by the header, not by breaking
+  the caller.
+
+- **`/v1/images/edits` silently billed for substituted defaults.** A wrong-typed
+  `model`/`size` was coerced to `None` rather than rejected, so the SDK filled
+  its default and charged: `{"size": 512}` meaning 512x512 quietly rendered a
+  1024x1024 image at the default model. Wrong types are refused now — the same
+  silent-drop-then-bill failure this release line exists to eliminate.
+
+- **`n` is bounded 1–10 before payment.** Base's `image2image` schema is
+  `z.number().optional().default(1)` — no int, no bounds — so `n=1000` passed
+  validation, took payment, then 400'd at the provider and lost the prepaid
+  USDC. (Solana already bounds it. The gateway-side fix belongs in `blockrun`;
+  this closes it at the sidecar for both chains today.)
+
+- **Post-settlement parse failures no longer answer 400 or skip the audit log.**
+  `pydantic.ValidationError` subclasses `ValueError`, and the SDK builds its
+  response model *after* settlement — so a gateway that took payment and
+  returned an unparseable body hit the `ValueError` arm, told the caller their
+  request was bad, and `raise`d before `log_proxy_call`, keeping real spend out
+  of reconciliation. Now 502, and logged like every other settled outcome.
+
+- **Blank optional fields mean "not set" everywhere**, not just for `quality`.
+  Blank `size`/`model` previously travelled as `""`: Base billed a default
+  image, Solana 400'd — same input, different chain, neither intended.
+
+- **Multipart image order follows the wire**, not field name. `getlist()` per
+  name grouped every `image` before every `image[]`, silently reordering a
+  client that mixed both spellings; order is load-bearing for fusion prompts.
+
+### Changed
+
+- `BLOCKRUN_MAX_IMAGE_PARTS` defaults to **4** (was 16) — the most any model
+  accepts. Parts 5–16 were read, base64-inflated ~1.33x, and uploaded twice (the
+  unpaid 402 probe, then the signed retry) only to earn a 400.
+- A missing `python-multipart` now returns **500**, not 400 — it's a server
+  install problem, not the caller's fault.
+- An `application/x-www-form-urlencoded` POST to the image routes now says so,
+  instead of reporting "Invalid JSON body".
+- `BLOCKRUN_MAX_IMAGE_*` env vars warn and fall back instead of crashing at
+  import on a malformed value.
+
+- **Version drift: `__version__` said `0.7.0` while `pyproject.toml` said
+  `0.7.1`.** 0.7.1 bumped only one of the two files, so an installed copy would
+  have under-reported itself. Caught only because 0.7.1 hadn't reached PyPI.
+
+### Testing
+
+- **`tests/test_version_consistency.py`** (new) fails if the two version
+  declarations ever diverge again. blockrun-llm has carried this guard since its
+  own 1.4.6 drift; the sidecar had none, and drifted twice (0.4.2, then 0.7.1).
+
+- **The contract test was vacuous again**, by a second mechanism. `_rejects()`
+  ended in `except Exception: return False`, so deleting `ImageClient.edit` was
+  swallowed into `False` and `assert not _rejects(...)` passed green while every
+  Base edit call would 500. Unexpected exceptions propagate now, the method's
+  existence is asserted up front, and the transport stub uses `raising=True` so
+  a renamed SDK method can't leave a probe hitting the live gateway.
+
+  That file has now been blind twice — first by reading signatures that
+  `**kwargs` hides, now by swallowing exceptions. Both mutations are verified to
+  fail.
+
 ## 0.7.1 — 2026-07-16
 
 ### Fixed

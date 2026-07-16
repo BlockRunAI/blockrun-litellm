@@ -188,7 +188,8 @@ class TestArgumentForwarding:
         assert response.status_code == 200
         assert mock.call_args.kwargs["input_type"] == "image"
 
-    def test_image_quality_forwarded(self, client, monkeypatch):
+    def test_image_quality_forwarded_on_solana(self, client, monkeypatch):
+        monkeypatch.setenv("BLOCKRUN_API_URL", "https://sol.blockrun.ai/api")
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
         response = client.post(
             "/v1/images/generations",
@@ -196,8 +197,10 @@ class TestArgumentForwarding:
         )
         assert response.status_code == 200
         assert mock.call_args.kwargs["quality"] == "low"
+        assert "x-blockrun-warning" not in response.headers
 
-    def test_image_edit_quality_forwarded(self, client, monkeypatch):
+    def test_image_edit_quality_forwarded_on_solana(self, client, monkeypatch):
+        monkeypatch.setenv("BLOCKRUN_API_URL", "https://sol.blockrun.ai/api")
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
         response = client.post(
             "/v1/images/edits",
@@ -209,6 +212,38 @@ class TestArgumentForwarding:
         )
         assert response.status_code == 200
         assert mock.call_args.kwargs["quality"] == "high"
+
+    def test_image_quality_on_base_is_served_dropped_and_warned(self, client, monkeypatch):
+        """0.6.1 returned 200 and ignored quality; 0.7.0 broke that with a 400.
+
+        Restore the 200 — quality is a standard OpenAI Images param and this is
+        a drop-in-compatible route — but surface the drop in a header so it
+        isn't the silent no-op 0.6.1 had.
+        """
+        monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)  # Base
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/generations",
+            json={"prompt": "a cat", "model": "openai/dall-e-3", "quality": "hd"},
+        )
+        assert response.status_code == 200, "a Base caller's working 0.6.1 code must not break"
+        assert mock.call_args.kwargs["quality"] is None, "must not reach the Base SDK"
+        assert "Solana only" in response.headers.get("x-blockrun-warning", "")
+
+    def test_image_edit_quality_on_base_is_served_dropped_and_warned(self, client, monkeypatch):
+        monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "make it green",
+                "image": "data:image/png;base64,AA==",
+                "quality": "hd",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] is None
+        assert "Solana only" in response.headers.get("x-blockrun-warning", "")
 
     def test_image_edit_json_multi_image_forwarded(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
@@ -357,3 +392,90 @@ class TestArgumentForwarding:
         response = client.post("/v1/images/edits", files=parts, data={"prompt": "fuse"})
         assert response.status_code == 200
         assert len(mock.call_args.kwargs["image"]) == 3
+
+    def test_bad_typed_size_or_model_is_rejected_not_silently_defaulted(self, client, monkeypatch):
+        """Refusing is free; guessing bills the caller for the wrong image.
+
+        0.7.0 coerced a wrong-typed value to None on /v1/images/edits, so the
+        SDK substituted its default and charged: {"size": 512} meaning 512x512
+        quietly rendered 1024x1024 at the default model.
+        """
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        for field, bad in (("size", 512), ("model", 99), ("quality", 5)):
+            body = {"prompt": "g", "image": "data:image/png;base64,AA==", field: bad}
+            response = client.post("/v1/images/edits", json=body)
+            assert response.status_code == 400, f"{field}={bad!r} must not be guessed at"
+        mock.assert_not_called()
+
+    def test_n_is_bounded_before_it_can_cost_anything(self, client, monkeypatch):
+        """Base's image2image gateway schema has no int/bounds on n, so n=1000
+        passes zod, takes payment, then 400s at the provider — prepaid USDC gone.
+        """
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        for bad in (0, -5, 1000, 11):
+            response = client.post("/v1/images/generations", json={"prompt": "a", "n": bad})
+            assert response.status_code == 400, f"n={bad} should be refused locally"
+        mock.assert_not_called()
+
+    def test_n_within_bounds_still_works(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post("/v1/images/generations", json={"prompt": "a", "n": 10})
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["n"] == 10
+
+    def test_blank_optional_strings_are_unset_not_empty(self, client, monkeypatch):
+        """Blank size/model reached the SDK as "" before: Base billed a default
+        image, Solana 400'd. Same input, different chain, neither intended.
+        """
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/generations", json={"prompt": "a", "size": "", "model": "  "}
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["size"] is None
+        assert mock.call_args.kwargs["model"] is None
+
+    def test_blank_multipart_mask_is_unset(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"prompt": "green", "mask": "", "size": "", "n": ""},
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["mask"] is None
+        assert mock.call_args.kwargs["size"] is None
+        assert mock.call_args.kwargs["n"] == 1
+
+    def test_multipart_image_order_is_wire_order(self, client, monkeypatch):
+        """Order is load-bearing for fusion ("the logo from image 2 on image 1").
+
+        getlist() per field name grouped all `image` before all `image[]`,
+        silently reordering a client that mixed both spellings.
+        """
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        png = b"\x89PNG\r\n\x1a\n"
+        response = client.post(
+            "/v1/images/edits",
+            files=[
+                ("image[]", ("first.png", png + b"\x01", "image/png")),
+                ("image", ("second.png", png + b"\x02", "image/png")),
+            ],
+            data={"prompt": "fuse"},
+        )
+        assert response.status_code == 200
+        images = mock.call_args.kwargs["image"]
+        assert len(images) == 2
+        # first.png was sent first, so it must arrive first despite the name mismatch
+        import base64
+        assert base64.b64decode(images[0].split(",", 1)[1]).endswith(b"\x01")
+
+    def test_urlencoded_body_names_the_real_problem(self, client, monkeypatch):
+        _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            data={"prompt": "g", "image": "data:image/png;base64,AA=="},
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        assert response.status_code == 400
+        assert "urlencoded" in str(response.json()).lower()

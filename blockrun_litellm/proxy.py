@@ -64,6 +64,7 @@ except ImportError as exc:  # pragma: no cover - import-time guard
 
 import httpx
 import json as _json
+from pydantic import ValidationError
 
 from blockrun_llm.types import APIError, PaymentError
 from blockrun_llm.tx_log import decode_settlement_header
@@ -81,6 +82,27 @@ except ImportError:
     _SolanaRpcException = None  # type: ignore[assignment,misc]
 
 log = logging.getLogger("blockrun_litellm.proxy")
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive int from the env, falling back on anything unusable.
+
+    These are read at import, so a bare ``int(os.environ[...])`` turns a typo in
+    a deploy script into crash-on-startup with a bare ValueError. A size limit
+    is not worth refusing to boot over: warn and use the default.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        log.warning("%s=%r is not a positive integer; using %d", name, raw, default)
+        return default
+    return value
+
 
 # Limit concurrent in-flight requests to avoid saturating upstream rate limits.
 # Anthropic (claude-opus-*) has strict TPM/RPM caps — raising this too high
@@ -381,6 +403,10 @@ def _open_upstream_stream(
 # (x402 v2 ``PAYMENT-RESPONSE``) carries no amount field — without this the
 # passthrough knew the tx hash but not the charge.
 _SIGNED_AMOUNT_HEADER = "x-blockrun-signed-amount-micro"
+# Carries "we served this, but ignored something you sent" — e.g. `quality` on a
+# chain that has no such field. A dropped param the caller never hears about is
+# the failure mode worth a header.
+_WARNING_HEADER = "x-blockrun-warning"
 
 
 def _decode_signed_amount_micro(header: Optional[str]) -> Optional[str]:
@@ -662,8 +688,15 @@ def _media_settlement(result: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
+async def _media_endpoint(
+    path: str, model: Optional[str], call: Any, *, warning: Optional[str] = None
+) -> Any:
     """Shared admission gate + error mapping + audit logging for media routes.
+
+    ``warning`` rides out on ``x-blockrun-warning`` when the request was served
+    but something the caller sent was ignored — a param the configured chain
+    doesn't have. The call still succeeds; the header is what keeps "ignored"
+    from meaning "silent".
 
     ``call`` is a zero-arg coroutine factory invoking the adapter. Maps
     ValueError → 400 (SDK request validation, e.g. lyrics + instrumental),
@@ -673,6 +706,14 @@ async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
     reconciliation. The SDK doesn't expose the wallet charge for media yet
     (cost_usd=None); the settlement tx hash from the response body is logged
     and surfaced via the x-blockrun-settlement header.
+
+    ``ValidationError`` is caught FIRST and deliberately: pydantic's subclasses
+    ``ValueError``, and the SDK builds its response model *after* settlement. So
+    a gateway that takes payment and then returns an unparseable body would fall
+    into the ValueError arm — answering 400, blaming the caller for a request
+    they already paid for, and returning via ``raise`` before log_proxy_call ever
+    runs, keeping real spend out of reconciliation. It is upstream's fault, not
+    the caller's: 502, and logged like every other settled outcome.
     """
     _t0 = time.monotonic()
     req_id = uuid.uuid4().hex
@@ -681,6 +722,13 @@ async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
         try:
             result = await call()
             status, payload = 200, result
+        except ValidationError as exc:
+            status = 502
+            payload = {
+                "error": "Upstream returned a response the SDK could not parse. "
+                "The call may already have settled — check the audit log.",
+                "detail": str(exc)[:500],
+            }
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except PaymentError as exc:
@@ -699,11 +747,10 @@ async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
         latency_ms=(time.monotonic() - _t0) * 1000.0,
         request_id=req_id,
     )
-    return JSONResponse(
-        status_code=status,
-        content=payload,
-        headers=_cost_response_headers(None, settlement),
-    )
+    headers = _cost_response_headers(None, settlement)
+    if warning:
+        headers[_WARNING_HEADER] = warning
+    return JSONResponse(status_code=status, content=payload, headers=headers)
 
 
 def _optional_str(value: Any) -> Optional[str]:
@@ -711,13 +758,71 @@ def _optional_str(value: Any) -> Optional[str]:
 
     A blank string means "not set", not "set to empty" — multipart clients
     routinely emit every optional field, blank ones included, and a JSON caller
-    templating `""` means the same thing. Without this, a blank `quality` on
-    Base would trip the Solana-only guard and answer 400 with a message about a
-    parameter the caller never knowingly sent.
+    templating `""` means the same thing. The Solana gateway's own multipart
+    handler strips blanks the same way.
+
+    Applies to every optional string on these routes, not just one: 0.7.0 used
+    it for `quality` alone, so a blank `size`/`model` still travelled as `""` —
+    which Base turned into a *billed* default image and Solana turned into a
+    400. Same input, different chain, neither what the caller meant.
     """
     if isinstance(value, str) and value.strip():
         return value
     return None
+
+
+def _require_optional_str(value: Any, field: str) -> Optional[str]:
+    """Blank/absent → None; a real string → itself; anything else → 400.
+
+    The distinction matters for money. Silently coercing a wrong-typed value to
+    None (0.7.0's `x if isinstance(x, str) else None`) lets the SDK substitute
+    its default and **bill for it**: `{"size": 512}` meaning 512x512 quietly
+    rendered a 1024x1024 image at the default model. Refusing is free; guessing
+    costs the caller a generation they didn't ask for.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _optional_str(value)
+    raise HTTPException(400, f"`{field}` must be a string")
+
+
+def _require_image_n(value: Any) -> int:
+    """Bound `n` locally, before it can cost anything.
+
+    Base's `image2image` gateway schema is `z.number().optional().default(1)` —
+    no int, no bounds — so `n=1000` passes validation, takes payment, and only
+    then 400s at the provider, losing the prepaid USDC. Solana already bounds it
+    (`.int().min(1).max(10)`). 10 is the ceiling the Base *text-to-image* schema
+    uses, whose own comment names this exact loss.
+    """
+    if isinstance(value, str) and not value.strip():
+        return 1  # blank multipart field means "unset"
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "`n` must be an integer")
+    if not 1 <= n <= 10:
+        raise HTTPException(400, "`n` must be between 1 and 10")
+    return n
+
+
+def _image_quality(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve `quality` for the configured chain. Returns (value, warning).
+
+    `quality` only exists on the Solana gateway. On Base it is dropped and the
+    caller is told via ``x-blockrun-warning`` — see the rationale on
+    :data:`_adapter._QUALITY_UNSUPPORTED_ON_BASE` for why this is a warning and
+    not the 400 that 0.7.0 shipped.
+
+    Chain is read with the adapter's own ``_is_solana_url(None)``, the identical
+    rule ``get_image_client`` routes on (it falls back to BLOCKRUN_API_URL), so
+    the header can't disagree with which client actually ran.
+    """
+    quality = _require_optional_str(value, "quality")
+    if quality is not None and not _adapter._is_solana_url(None):
+        return None, _adapter._QUALITY_UNSUPPORTED_ON_BASE
+    return quality, None
 
 
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
@@ -728,22 +833,21 @@ async def image_generations(request: Request) -> Any:
     if not isinstance(prompt, str) or not prompt.strip():
         raise HTTPException(400, "`prompt` is required and must be text")
 
-    try:
-        n: int = int(body.get("n", 1))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "`n` must be an integer")
-
-    model: Optional[str] = body.get("model")
+    n = _require_image_n(body.get("n", 1))
+    model = _require_optional_str(body.get("model"), "model")
+    size = _require_optional_str(body.get("size"), "size")
+    quality, warning = _image_quality(body.get("quality"))
     return await _media_endpoint(
         "/v1/images/generations",
         model,
         lambda: _adapter.image_generation_async(
             prompt=prompt,
             model=model,
-            size=body.get("size"),
+            size=size,
             n=n,
-            quality=_optional_str(body.get("quality")),
+            quality=quality,
         ),
+        warning=warning,
     )
 
 
@@ -767,11 +871,16 @@ def _require_image_payload(value: Any, field: str) -> None:
 # held in RAM; converting to a data URI reads it back and base64 inflates it
 # ~1.33x, which undoes that. Cap each upload so a mistaken 2GB POST fails fast
 # instead of being buffered and encoded before the gateway rejects it.
-_MAX_IMAGE_BYTES: int = int(os.environ.get("BLOCKRUN_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
+_MAX_IMAGE_BYTES: int = _positive_int_env("BLOCKRUN_MAX_IMAGE_BYTES", 12 * 1024 * 1024)
 # A resource guard, not a contract rule: per-model limits (openai/* up to 4,
 # google/* up to 3) stay the gateway's call so this can't drift as the catalog
 # changes. This only bounds how much we buffer before it gets to say so.
-_MAX_IMAGE_PARTS: int = int(os.environ.get("BLOCKRUN_MAX_IMAGE_PARTS", "16"))
+#
+# 4 = the most any model accepts today. The old 16 meant parts 5-16 were read,
+# base64-inflated ~1.33x, and uploaded TWICE (the unpaid 402 probe, then the
+# signed retry) purely to earn a 400 — up to ~256MB of traffic for a request
+# that could never succeed. Raise it if the catalog ever allows more.
+_MAX_IMAGE_PARTS: int = _positive_int_env("BLOCKRUN_MAX_IMAGE_PARTS", 4)
 
 
 async def _image_form_value(value: Any, field: str) -> str:
@@ -802,10 +911,23 @@ async def image_edits(request: Request) -> Any:
     if "multipart/form-data" in content_type:
         try:
             form = await request.form()
+        except AssertionError as exc:
+            # Starlette asserts python-multipart is importable. That's a server
+            # install problem (it's in the [proxy] extra) — 400 would blame the
+            # caller for our missing dependency.
+            raise HTTPException(
+                500,
+                "Multipart support requires python-multipart. Install with: "
+                "pip install 'blockrun-litellm[proxy]'",
+            ) from exc
         except Exception as exc:
             raise HTTPException(400, f"Invalid multipart form: {exc}") from exc
         prompt = form.get("prompt")
-        values = list(form.getlist("image")) + list(form.getlist("image[]"))
+        # multi_items() preserves wire order across BOTH field names; getlist()
+        # per name would group all `image` before all `image[]` and silently
+        # reorder a mixed client's inputs. Order is load-bearing for fusion —
+        # prompts say "the logo from image 2 on image 1".
+        values = [v for k, v in form.multi_items() if k in ("image", "image[]")]
         if not values:
             raise HTTPException(400, "`image` is required")
         if len(values) > _MAX_IMAGE_PARTS:
@@ -815,21 +937,35 @@ async def image_edits(request: Request) -> Any:
         images = [await _image_form_value(value, "image") for value in values]
         image: Any = images[0] if len(images) == 1 else images
         mask_value = form.get("mask")
+        # A blank `mask=` field means "no mask", not "an empty mask" — same
+        # reasoning as _optional_str, which the rest of these fields use.
+        if isinstance(mask_value, str) and not mask_value.strip():
+            mask_value = None
         mask = await _image_form_value(mask_value, "mask") if mask_value is not None else None
-        model = form.get("model")
-        size = form.get("size")
-        quality = form.get("quality")
+        model = _require_optional_str(form.get("model"), "model")
+        size = _require_optional_str(form.get("size"), "size")
+        quality_raw = form.get("quality")
         n_raw = form.get("n", 1)
     else:
+        if "application/x-www-form-urlencoded" in content_type:
+            # Only multipart and JSON are branched on; without this a urlencoded
+            # POST falls through to _json_body and is told its JSON is invalid,
+            # which points at the wrong thing entirely.
+            raise HTTPException(
+                400,
+                "Send this route as application/json or multipart/form-data; "
+                "application/x-www-form-urlencoded is not supported (it cannot "
+                "carry image uploads).",
+            )
         body = await _json_body(request)
         prompt = body.get("prompt")
         image = body.get("image")
         if image is None:
             raise HTTPException(400, "`image` is required")
         mask = body.get("mask")
-        model = body.get("model")
-        size = body.get("size")
-        quality = body.get("quality")
+        model = _require_optional_str(body.get("model"), "model")
+        size = _require_optional_str(body.get("size"), "size")
+        quality_raw = body.get("quality")
         n_raw = body.get("n", 1)
 
     # Must be a *string*, not merely truthy. A `prompt` sent as a multipart file
@@ -840,23 +976,22 @@ async def image_edits(request: Request) -> Any:
     _require_image_payload(image, "image")
     if mask is not None:
         _require_image_payload(mask, "mask")
-    try:
-        n = int(n_raw)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "`n` must be an integer")
+    n = _require_image_n(n_raw)
+    quality, warning = _image_quality(quality_raw)
 
     return await _media_endpoint(
         request.url.path,
-        model if isinstance(model, str) else None,
+        model,
         lambda: _adapter.image_edit_async(
             prompt=prompt,
             image=image,
-            model=model if isinstance(model, str) else None,
+            model=model,
             mask=mask,
-            size=size if isinstance(size, str) else None,
+            size=size,
             n=n,
-            quality=_optional_str(quality),
+            quality=quality,
         ),
+        warning=warning,
     )
 
 

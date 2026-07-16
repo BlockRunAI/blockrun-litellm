@@ -49,31 +49,41 @@ def _accepted(func) -> set:
     }
 
 
+class _StubReached(Exception):
+    """The call got past the runtime guard and hit the stubbed transport."""
+
+
 def _rejects(monkeypatch, method_name: str, *args, **kwargs) -> bool:
     """Does ``ImageClient.<method_name>`` refuse these kwargs before the wire?
 
-    Returns True if the runtime guard raises TypeError. Returns False if the
-    call got past the guard and reached the (stubbed) transport, which is the
-    signal that the SDK now accepts the kwarg.
+    True when the runtime guard raises TypeError; False when the call reaches
+    the stubbed transport, which means the SDK now accepts the kwarg.
+
+    Every other exception propagates, deliberately. An earlier version ended in
+    ``except Exception: return False``, which made the "accepts" assertions
+    vacuous: delete ``ImageClient.edit`` and the AttributeError was swallowed
+    into False, so ``assert not _rejects(...)`` passed green while every Base
+    edit call would 500. This file exists to catch tests that cannot fail —
+    it does not get to contain one.
     """
     ImageClient = blockrun_image.ImageClient
+    assert hasattr(ImageClient, method_name), (
+        f"ImageClient.{method_name} no longer exists — the adapter's Base branch "
+        f"calls it and would raise AttributeError at runtime"
+    )
 
     def _stub(self, *a, **k):
         raise _StubReached()
 
-    class _StubReached(Exception):
-        pass
-
-    monkeypatch.setattr(ImageClient, "_request_with_payment", _stub, raising=False)
+    # raising=True: if the SDK renames its transport method this must fail loudly
+    # rather than silently stub nothing and let a probe hit the real network.
+    monkeypatch.setattr(ImageClient, "_request_with_payment", _stub, raising=True)
     client = ImageClient.__new__(ImageClient)  # the guard runs before any I/O
     try:
         getattr(client, method_name)(*args, **kwargs)
     except TypeError:
         return True
     except _StubReached:
-        return False
-    except Exception:
-        # Any other failure means the guard did not fire either.
         return False
     return False
 
