@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
@@ -78,41 +79,69 @@ def _a_validation_error() -> ValidationError:
 
 
 class TestSolanaChargedFailures:
-    def test_upstream_failure_is_flagged_unknown(self, client, monkeypatch, log_path):
-        """The case that loses money silently: optimistic settle + 5xx."""
+    """EVERY Solana failure is flagged, not just 5xx.
+
+    An earlier cut gated on `>= 500`, reasoning that a 4xx is the gateway
+    refusing before settle. That is false, and it was the expensive kind of
+    wrong: the optimistic settle fires FIRST, so the charged failures come back
+    as 4xx — content filter → 400 (blockrun-sol images/generations:376), rate
+    limit → 429 (:359). Both routine, both client-triggerable, both charged.
+    """
+
+    @pytest.mark.parametrize(
+        "label,exc",
+        [
+            ("upstream 5xx", APIError("upstream boom", 500)),
+            # The one the >=500 gate missed. A prompt that trips the content
+            # filter is the single most common charged failure on this chain.
+            ("content policy → 400", APIError("Content policy violation", 400)),
+            ("rate limit → 429", APIError("Rate limit exceeded", 429)),
+            ("provider bad request → 400", APIError("bad request", 400)),
+            # Solana settles at POST; the poll route returns 402 on wallet
+            # binding AFTER the money moved ("the POST already settled").
+            (
+                "poll 402 after settle",
+                PaymentError("rejected", status_code=402, response={"details": "binding"}),
+            ),
+        ],
+    )
+    def test_every_failure_is_flagged_unknown(self, client, monkeypatch, log_path, label, exc):
         _solana(monkeypatch)
-        response = _call(client, monkeypatch, side_effect=APIError("upstream boom", 500))
-        assert response.status_code == 500
+        _call(client, monkeypatch, side_effect=exc)
         row = _last_row(log_path)
         assert row["settlement_status"] == "unknown", (
-            "a Solana 5xx can still have settled — logging cost_usd=None with no "
-            "flag reads as $0 and hides a real charge"
+            f"{label}: optimistic settle means this may have been charged — "
+            "cost_usd=None with no flag reads as $0 and hides a real debit"
         )
-        assert row["cost_usd"] is None  # still unknown, just no longer implied to be zero
-
-    def test_gateway_refusal_is_not_flagged(self, client, monkeypatch, log_path):
-        """4xx = refused before settle, on either chain. Flagging it is noise."""
-        _solana(monkeypatch)
-        _call(client, monkeypatch, side_effect=APIError("bad model", 400))
-        assert "settlement_status" not in _last_row(log_path)
-
-    def test_payment_rejected_is_not_flagged(self, client, monkeypatch, log_path):
-        """PaymentError means the payment itself never landed."""
-        _solana(monkeypatch)
-        _call(
-            client,
-            monkeypatch,
-            side_effect=PaymentError("rejected", status_code=402, response={"details": "no funds"}),
-        )
-        assert "settlement_status" not in _last_row(log_path)
+        assert row["cost_usd"] is None  # unknown, just no longer implied to be zero
 
 
 class TestBaseFailuresAreFree:
-    def test_upstream_failure_is_not_flagged(self, client, monkeypatch, log_path):
-        """Base settles only after a successful upstream call — a 5xx costs nothing."""
+    @pytest.mark.parametrize(
+        "label,exc",
+        [
+            ("upstream 5xx", APIError("upstream boom", 500)),
+            ("gateway 400", APIError("bad model", 400)),
+            ("payment rejected", PaymentError("rejected", status_code=402, response={})),
+        ],
+    )
+    def test_failures_are_not_flagged(self, client, monkeypatch, log_path, label, exc):
+        """Base media routes settle only after a successful upstream call, so a
+        failure is genuinely free. Flagging every Base error would be noise, and
+        noise gets ignored — which would cost us the Solana signal too.
+        """
         _base(monkeypatch)
-        _call(client, monkeypatch, side_effect=APIError("upstream boom", 500))
-        assert "settlement_status" not in _last_row(log_path)
+        _call(client, monkeypatch, side_effect=exc)
+        assert "settlement_status" not in _last_row(log_path), f"{label} is free on Base"
+
+    def test_our_own_await_ceiling_is_flagged(self, client, monkeypatch, log_path):
+        """504 is _run_media giving up on the wait — it abandons the await but
+        leaves the worker running, so the call can still complete and settle.
+        The only Base failure we cannot call free.
+        """
+        _base(monkeypatch)
+        _call(client, monkeypatch, side_effect=APIError("await ceiling exceeded", 504))
+        assert _last_row(log_path)["settlement_status"] == "unknown"
 
 
 class TestChargedOnBothChains:
@@ -140,3 +169,61 @@ class TestSuccessRowsUnchanged:
         row = _last_row(log_path)
         assert "settlement_status" not in row, "proven settled needs no flag — the tx is right there"
         assert row["settlement"]["tx_hash"] == "0xabc"
+
+
+class TestEveryExitLogs:
+    """A media call that moves money and leaves NO audit row is invisible to
+    reconciliation — strictly worse than one recorded with an unknown cost.
+
+    Both holes below produced exactly that: the arm returned via `raise`, or no
+    arm matched at all, so log_proxy_call never ran.
+    """
+
+    def test_malformed_paid_body_is_logged_not_blamed_on_the_caller(
+        self, client, monkeypatch, log_path
+    ):
+        """json.JSONDecodeError IS a ValueError.
+
+        The SDK parses the paid 200 with a bare `.json()`, so a truncated body
+        raised JSONDecodeError → the ValueError arm → HTTPException(400) →
+        `raise` → no row. The gateway had already settled: money moved, the
+        caller got blamed for it, and reconciliation never saw the call.
+        Catching ValidationError first did not help — `.json()` fails before
+        pydantic is ever reached.
+        """
+        _base(monkeypatch)
+        exc = json.JSONDecodeError("Expecting value", "<truncated body>", 0)
+        assert isinstance(exc, ValueError), "premise of this test"
+        response = _call(client, monkeypatch, side_effect=exc)
+
+        assert response.status_code == 502, "upstream's fault, not the caller's"
+        row = _last_row(log_path)
+        assert row["settlement_status"] == "unknown", "settle ran before the parse failed"
+
+    def test_transport_error_after_payment_still_logs(self, client, monkeypatch, log_path):
+        """httpx.ReadTimeout escapes the SDK unwrapped and matched no arm, so a
+        timeout on a 10-minute image call whose optimistic settle had already
+        fired left no row at all. A timeout is the likeliest failure on that route.
+        """
+        _solana(monkeypatch)
+        response = _call(client, monkeypatch, side_effect=httpx.ReadTimeout("timed out"))
+        assert response.status_code == 502
+        assert _last_row(log_path)["settlement_status"] == "unknown"
+
+    def test_local_validation_error_still_logs_but_is_not_flagged(
+        self, client, monkeypatch, log_path
+    ):
+        """SDK request validation is local and pre-payment: 400, a row, no flag.
+
+        It must still produce a row (the invariant is every exit logs) and must
+        keep the {"detail": ...} shape callers already parse.
+        """
+        _solana(monkeypatch)
+        response = _call(
+            client, monkeypatch, side_effect=ValueError("Cannot specify lyrics when instrumental")
+        )
+        assert response.status_code == 400
+        assert "lyrics" in response.json()["detail"], "response shape must not change"
+        row = _last_row(log_path)
+        assert row["http_status"] == 400
+        assert "settlement_status" not in row, "never reached the gateway — genuinely free"
