@@ -14,13 +14,38 @@
   therefore co-occur exactly when it matters.
 
   The audit row now carries `settlement_status: "unknown"` in that case, so
-  reconciliation investigates instead of trusting a zero. Base failures are
-  **not** flagged — Base settles only after a successful upstream call, so a
-  failure there is genuinely free, and a flag on every Base error would be noise.
+  reconciliation investigates instead of trusting a zero.
 
-  One case is flagged on **both** chains: the gateway settles, returns 200, and
-  the SDK cannot parse the body (`ValidationError` → 502). The money moved
-  regardless of chain.
+  **Every** Solana failure is flagged, not just 5xx. The settle fires *first*, so
+  the charged failures come back as 4xx: a content-filter rejection is **400**
+  (blockrun-sol `images/generations:376`) and a rate limit **429** (`:359`) —
+  both routine, both client-triggerable, both charged. 402 is not exempt either:
+  Solana settles at POST, and the poll returns 402 on wallet-binding *after* the
+  money moved. The single exemption is a proof rather than a guess — the SDK's
+  own request validation raises before anything goes on the wire.
+
+  Base failures are **not** flagged: Base media routes settle only after a
+  successful upstream call, so a failure is genuinely free, and a flag on every
+  Base error would be noise that gets ignored. The exception is **504** — our own
+  await ceiling, which abandons the wait but leaves the worker running, so the
+  call can still complete and settle.
+
+  Flagged on **both** chains: the gateway settles, returns 200, and the body
+  won't parse (`ValidationError` *or* `json.JSONDecodeError` → 502).
+
+  **Every exit now logs.** Two paths previously wrote no row at all — worse than
+  an unflagged one, because a call that moves money and leaves no trace is
+  invisible to reconciliation. `json.JSONDecodeError` subclasses `ValueError`,
+  and the SDK parses the paid 200 with a bare `.json()`, so a truncated body
+  answered 400 (blaming the caller for a call they paid for) and returned via
+  `raise` before the log ran. Transport errors (`httpx.ReadTimeout` on a
+  10-minute image call) matched no arm at all.
+
+  Applied to **all five** log sites — media, the OpenAI Videos job route, and the
+  chat/messages passthrough. Chat is the highest-volume paid route and Solana
+  settles it optimistically: on failure the gateway logs "CHARGED BUT REQUEST
+  FAILED — refund manually" and throws, so the error carries no settlement
+  header. Reading headers only helps when there is one.
 
   The check is one bit of chain, not a table of which Solana routes settle
   optimistically — that table lives in the gateway and would drift here. The
@@ -28,11 +53,6 @@
   "$0" loses a real charge. Solana's video route settles on the completed poll
   and will occasionally be flagged for nothing; that is the trade, taken on
   purpose.
-
-  Only the media routes needed this. The chat passthrough proxies raw responses
-  and already reads cost/settlement from headers even on errors; the media
-  routes go through the SDK, which raises, so the sidecar never sees a response
-  at all.
 
   The gateway ledger remains the authority on what actually settled — this flag
   says "go look", not "you were charged".
