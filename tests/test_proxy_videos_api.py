@@ -94,6 +94,16 @@ class TestCreate:
         )
         assert r.status_code == 400
 
+    def test_blank_model_400_before_a_job_is_created(self, client, monkeypatch):
+        # This route creates the job and returns 202-style at once, so a blank
+        # model must be refused up front — once the background task dispatches,
+        # the default model is billed and there's nothing to take back.
+        mock = _mock_video_adapter(monkeypatch, return_value={"url": "u"})
+        r = client.post("/v1/videos", json={"prompt": "a cat", "model": "  "})
+        assert r.status_code == 400
+        assert "`model` must not be empty" in r.json()["detail"]
+        mock.assert_not_awaited()
+
     def test_invalid_seconds_400(self, client):
         r = client.post("/v1/videos", json={"prompt": "a cat", "seconds": "lots"})
         assert r.status_code == 400

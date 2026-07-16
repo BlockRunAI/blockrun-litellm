@@ -108,6 +108,32 @@ class TestVideoDispatch:
         assert call["model"] == "xai/grok-imagine-video"
 
     @pytest.mark.asyncio
+    async def test_bare_grok_model_is_canonicalized(self, monkeypatch):
+        client = FakeBaseVideoClient()
+        _route_to(monkeypatch, client, solana=False)
+        await _adapter.video_generation_async("a cat", model="grok-imagine-video")
+        (call,) = client.calls
+        assert call["model"] == "xai/grok-imagine-video"
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("seedance-2.0-fast", "bytedance/seedance-2.0-fast"),
+            ("  seedance-2.0-fast\n", "bytedance/seedance-2.0-fast"),
+            ("GROK-IMAGINE-VIDEO", "xai/grok-imagine-video"),
+            ("bytedance/seedance-2.0", "bytedance/seedance-2.0"),
+            # Ambiguous across vendors (azure/sora-2 vs openai/sora-2) — must NOT
+            # be guessed; it reaches the gateway bare and 400s with the real list.
+            ("sora-2", "sora-2"),
+            ("nonsense", "nonsense"),
+            (None, None),
+            (123, 123),
+        ],
+    )
+    def test_canonical_video_model_table(self, given, expected):
+        assert _adapter._canonical_video_model(given) == expected
+
+    @pytest.mark.asyncio
     async def test_base_strips_timeout_and_drops_none(self, monkeypatch):
         client = FakeBaseVideoClient()
         _route_to(monkeypatch, client, solana=False)

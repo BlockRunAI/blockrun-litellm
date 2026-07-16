@@ -51,18 +51,34 @@ _log = logging.getLogger(__name__)
 
 
 def _canonical_video_model(model: Optional[str]) -> Optional[str]:
-    """Normalize the short Seedance ids accepted by OpenAI-style clients.
+    """Namespace the short video model ids accepted by OpenAI-style clients.
 
     Token360 documents ``seedance-2.0-fast`` while BlockRun's gateway catalog
     uses canonical provider-qualified ids.  The proxy must bridge that naming
     difference before calling the SDK's flat ``/videos/generations`` surface.
+    The gateway does the same rewrite itself, but only in its ``content[]``
+    handler for ``POST /v1/videos`` — never on the flat surface the SDK posts
+    to, and the SDK doesn't normalize either.
 
     The id is lowercased on the way through: the catalog lookup is an exact
     ``==`` match, so a case-preserved ``bytedance/Seedance-2.0-Fast`` would 400
     just like the bare id it replaced.
+
+    Only unambiguous bare ids are mapped, and only ones whose vendor is implied
+    by the name itself.  ``sora-2`` is deliberately absent: the catalog ships it
+    under *two* vendors (``azure/sora-2``, available; ``openai/sora-2``, not),
+    so there is no namespace to infer — guessing would silently pick a vendor on
+    the caller's behalf, and the choice would flip meaning the day availability
+    does.  An unmapped bare id reaches the gateway untouched and 400s with the
+    full list of real ids, which is the better answer than a confident guess.
     """
-    if isinstance(model, str) and model.lower().startswith("seedance-"):
-        return f"bytedance/{model.lower()}"
+    if not isinstance(model, str):
+        return model
+    bare = model.strip().lower()
+    if bare.startswith("seedance-"):
+        return f"bytedance/{bare}"
+    if bare == "grok-imagine-video":
+        return f"xai/{bare}"
     return model
 
 

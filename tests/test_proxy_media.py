@@ -34,6 +34,11 @@ ROUTES = [
     ("/v1/audio/sound-effects", "sound_effect_async", {"text": "boom"}),
 ]
 
+# Every JSON route that names a billed model refuses a blank one. The multipart
+# `/v1/images/edits` branch is the one exception (a form spells "unset" as "") —
+# covered separately by test_multipart_blank_model_still_means_unset.
+MODEL_NAMED_ROUTES = ROUTES
+
 OK_RESULT: Dict[str, Any] = {
     "created": 1_700_000_000,
     "model": "stub-model",
@@ -72,6 +77,47 @@ class TestValidation:
         r = client.post("/v1/images/generations", json={"prompt": "a cat", "n": "lots"})
         assert r.status_code == 400
         assert "`n` must be an integer" in r.json()["detail"]
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_model_400_and_never_dispatched(self, client, monkeypatch, route, fn, body, blank):
+        # The money assertion is `assert_not_awaited`: a blank model is falsy, so
+        # the SDK's `model or DEFAULT_MODEL` would silently bill the default.
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json={**body, "model": blank})
+        assert r.status_code == 400
+        assert "`model` must not be empty" in r.json()["detail"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    def test_non_string_model_400_and_never_dispatched(self, client, monkeypatch, route, fn, body):
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json={**body, "model": 123})
+        assert r.status_code == 400
+        assert "`model` must be a string" in r.json()["detail"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.parametrize("route,fn,body", MODEL_NAMED_ROUTES)
+    def test_omitted_model_still_opts_into_the_default(self, client, monkeypatch, route, fn, body):
+        # Omitting `model` stays documented and free — only a *blank* one is a bug.
+        mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
+        r = client.post(route, json=body)
+        assert r.status_code == 200
+        assert mock.await_args.kwargs["model"] is None
+
+    def test_multipart_blank_model_still_means_unset(self, client, monkeypatch):
+        """The deliberate exception to the rule above: a form emits every field
+        it knows about, so a blank `model=` is how "unset" is spelled on the
+        wire — not the caller bug an empty JSON field is. Refusing it here would
+        break form clients that work today."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        r = client.post(
+            "/v1/images/edits",
+            data={"prompt": "make it green", "model": ""},
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        )
+        assert r.status_code == 200
+        assert mock.await_args.kwargs["model"] is None
 
 
 class TestSuccess:
@@ -424,16 +470,18 @@ class TestArgumentForwarding:
         assert mock.call_args.kwargs["n"] == 10
 
     def test_blank_optional_strings_are_unset_not_empty(self, client, monkeypatch):
-        """Blank size/model reached the SDK as "" before: Base billed a default
-        image, Solana 400'd. Same input, different chain, neither intended.
+        """Blank size reached the SDK as "" before: Base billed a default image,
+        Solana 400'd. Same input, different chain, neither intended.
+
+        `model` used to be asserted here too, and 0.7.3 split it out: "unset" is
+        free for `size` but not for `model`, which the SDK coalesces into a billed
+        default. A blank JSON `model` now 400s — see
+        TestValidation::test_blank_model_400_and_never_dispatched.
         """
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
-        response = client.post(
-            "/v1/images/generations", json={"prompt": "a", "size": "", "model": "  "}
-        )
+        response = client.post("/v1/images/generations", json={"prompt": "a", "size": ""})
         assert response.status_code == 200
         assert mock.call_args.kwargs["size"] is None
-        assert mock.call_args.kwargs["model"] is None
 
     def test_blank_multipart_mask_is_unset(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
