@@ -362,17 +362,33 @@ curl http://localhost:4001/v1/chat/completions \
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
 | `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
-| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`. |
+| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`, and `quality` (Solana only — see below). |
+| `POST` | `/v1/images/edits` | OpenAI-compatible image editing. Accepts JSON data URIs or multipart `image`/`image[]`; supports multiple source images, `mask`, and `quality` (Solana only). `/v1/images/image2image` is an alias. |
 | `POST` | `/v1/videos` | OpenAI Videos API create (what LiteLLM's video routes call) — returns a job object immediately |
 | `GET`  | `/v1/videos/{id}` | OpenAI Videos API status poll (`queued` → `in_progress` → `completed`/`failed`) |
 | `GET`  | `/v1/videos/{id}/content` | Download the finished clip bytes |
-| `POST` | `/v1/videos/generations` | Native video generation — blocks until the clip is ready; settles only on completion |
+| `POST` | `/v1/videos/generations` | Native video generation. Supports `duration_seconds`, image/first-last-frame inputs, reference images, `input_type`, resolution, aspect ratio, audio, seed, and model-specific parameters. |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible TTS |
 | `POST` | `/v1/audio/generations` | Music generation |
 | `POST` | `/v1/audio/sound-effects` | Cinematic sound effects |
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
+
+#### `quality` and `input_type` (requires `blockrun-llm>=1.7.0`)
+
+**`quality`** (`low`/`medium`/`high`/`auto`, `openai/gpt-image-*`) is **Solana
+only**. The Base gateway defines no such field and would silently ignore it, so
+sending `quality` on Base returns **400** rather than quietly doing nothing.
+
+**`input_type`** (`text`/`image`/`first_last_frame`/`reference`) declares the
+seed mode you intend on `/v1/videos/generations`. The gateway infers the mode
+from the seed fields and returns **400 without charging** if your declaration
+disagrees. Useful when seed fields are built dynamically: a dropped `image_url`
+otherwise degrades silently to text-to-video and still bills you.
+
+Reference-to-video (`reference_videos`/`reference_audios`) is **not** supported:
+both gateways currently gate it off and would return 503.
 
 ### 2e. Image generation
 

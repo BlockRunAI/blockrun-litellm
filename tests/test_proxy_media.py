@@ -23,6 +23,11 @@ import blockrun_litellm.proxy as proxy
 # (route, adapter fn to mock, minimal valid body)
 ROUTES = [
     ("/v1/images/generations", "image_generation_async", {"prompt": "a cat"}),
+    (
+        "/v1/images/edits",
+        "image_edit_async",
+        {"prompt": "make it green", "image": "data:image/png;base64,AA=="},
+    ),
     ("/v1/videos/generations", "video_generation_async", {"prompt": "a cat"}),
     ("/v1/audio/speech", "speech_generation_async", {"input": "hi"}),
     ("/v1/audio/generations", "music_generation_async", {"prompt": "lo-fi"}),
@@ -169,3 +174,186 @@ class TestArgumentForwarding:
         assert "seed" not in kwargs
         assert "junk_key" not in kwargs
         assert kwargs["model"] is None  # omitted model forwards as None
+
+    def test_video_input_type_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "video_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/videos/generations",
+            json={
+                "prompt": "the portrait turns",
+                "image_url": "https://example.com/a.jpg",
+                "input_type": "image",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["input_type"] == "image"
+
+    def test_image_quality_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/generations",
+            json={"prompt": "a cat", "model": "openai/gpt-image-2", "quality": "low"},
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] == "low"
+
+    def test_image_edit_quality_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "make it green",
+                "image": "data:image/png;base64,AA==",
+                "quality": "high",
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] == "high"
+
+    def test_image_edit_json_multi_image_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        images = ["data:image/png;base64,AA==", "data:image/png;base64,AQ=="]
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "combine",
+                "model": "openai/gpt-image-2",
+                "image": images,
+            },
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["image"] == images
+        assert mock.call_args.kwargs["model"] == "openai/gpt-image-2"
+
+    def test_image_edit_multipart_forwarded(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            data={"prompt": "combine", "model": "google/nano-banana"},
+            files=[
+                ("image", ("a.png", b"first", "image/png")),
+                ("image", ("b.png", b"second", "image/png")),
+            ],
+        )
+        assert response.status_code == 200
+        images = mock.call_args.kwargs["image"]
+        assert len(images) == 2
+        assert all(value.startswith("data:image/png;base64,") for value in images)
+
+    def test_blank_quality_is_treated_as_unset(self, client, monkeypatch):
+        """A blank field means "not set", not "set to empty".
+
+        Multipart clients routinely emit every optional field, blank ones
+        included. Without normalization a blank `quality` would reach the
+        Solana-only guard and 400 about a parameter the caller never sent.
+        """
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        for blank in ("", "   "):
+            response = client.post(
+                "/v1/images/generations",
+                json={"prompt": "a cat", "quality": blank},
+            )
+            assert response.status_code == 200
+            assert mock.call_args.kwargs["quality"] is None
+
+    def test_blank_quality_multipart_is_treated_as_unset(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, "image/png")},
+            data={"prompt": "make it green", "quality": ""},
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] is None
+
+    def test_prompt_sent_as_file_part_is_rejected(self, client, monkeypatch):
+        """A multipart `prompt` file part is truthy but is not text.
+
+        Before the isinstance guard, str() on the UploadFile billed
+        "UploadFile(filename='p.txt', ...)" as the generation prompt — a paid
+        call against a garbage prompt, and a 200 hiding it.
+        """
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            files={
+                "image": ("a.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, "image/png"),
+                "prompt": ("p.txt", b"hello", "text/plain"),
+            },
+        )
+        assert response.status_code == 400
+        assert "prompt" in str(response.json()).lower()
+        mock.assert_not_called()  # nothing billable escaped
+
+    def test_blank_prompt_is_rejected(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        for bad in ("", "   ", 123, None):
+            response = client.post("/v1/images/generations", json={"prompt": bad})
+            assert response.status_code == 400, f"{bad!r} should be refused"
+        mock.assert_not_called()
+
+    def test_non_string_image_payload_is_rejected(self, client, monkeypatch):
+        """Refuse locally instead of paying for the gateway to say no."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        for bad in (12345, {"url": "x"}, [123], ""):
+            response = client.post(
+                "/v1/images/edits",
+                json={"prompt": "make it green", "image": bad},
+            )
+            assert response.status_code == 400, f"{bad!r} should be refused"
+        mock.assert_not_called()
+
+    def test_non_string_mask_is_rejected(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            json={
+                "prompt": "make it green",
+                "image": "data:image/png;base64,AA==",
+                "mask": 123,
+            },
+        )
+        assert response.status_code == 400
+        mock.assert_not_called()
+
+    def test_valid_multipart_edit_still_works(self, client, monkeypatch):
+        """The guards must not break the happy path they surround."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, "image/png")},
+            data={"prompt": "make it green", "model": "openai/gpt-image-2"},
+        )
+        assert response.status_code == 200
+        kwargs = mock.call_args.kwargs
+        assert kwargs["prompt"] == "make it green"
+        assert kwargs["image"].startswith("data:image/png;base64,")
+
+    def test_oversized_upload_is_rejected(self, client, monkeypatch):
+        """Fail fast rather than buffer + base64-inflate a huge body first."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (13 * 1024 * 1024)
+        response = client.post(
+            "/v1/images/edits",
+            files={"image": ("big.png", big, "image/png")},
+            data={"prompt": "make it green"},
+        )
+        assert response.status_code == 413
+        mock.assert_not_called()
+
+    def test_too_many_image_parts_rejected(self, client, monkeypatch):
+        """A buffering guard only — per-model caps stay the gateway's call."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        parts = [("image", (f"{i}.png", b"\x89PNG\r\n\x1a\n", "image/png")) for i in range(20)]
+        response = client.post("/v1/images/edits", files=parts, data={"prompt": "green"})
+        assert response.status_code == 400
+        assert "image parts" in str(response.json())
+        mock.assert_not_called()
+
+    def test_multi_image_under_the_cap_still_fuses(self, client, monkeypatch):
+        """The cap must not disturb the multi-image fusion the PR exists for."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        parts = [("image", (f"{i}.png", b"\x89PNG\r\n\x1a\n", "image/png")) for i in range(3)]
+        response = client.post("/v1/images/edits", files=parts, data={"prompt": "fuse"})
+        assert response.status_code == 200
+        assert len(mock.call_args.kwargs["image"]) == 3
