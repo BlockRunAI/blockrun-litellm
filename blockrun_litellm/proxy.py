@@ -725,8 +725,8 @@ async def image_generations(request: Request) -> Any:
     body = await _json_body(request)
 
     prompt = body.get("prompt")
-    if not prompt:
-        raise HTTPException(400, "`prompt` is required")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(400, "`prompt` is required and must be text")
 
     try:
         n: int = int(body.get("n", 1))
@@ -747,6 +747,33 @@ async def image_generations(request: Request) -> Any:
     )
 
 
+def _require_image_payload(value: Any, field: str) -> None:
+    """Reject non-string image payloads before they reach the SDK.
+
+    The multipart path already produces data URIs via ``_image_form_value``; the
+    JSON path forwarded whatever was sent, so ``{"image": 12345}`` travelled to
+    the gateway to be rejected there — a wasted round-trip on a request we can
+    refuse locally. ``model``/``size``/``quality`` are guarded the same way.
+    """
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        raise HTTPException(400, f"`{field}` is required")
+    for item in values:
+        if not isinstance(item, str) or not item.strip():
+            raise HTTPException(400, f"`{field}` must be a data URI string, or a list of them")
+
+
+# Starlette spools uploads over ~1MB to disk precisely so a large body isn't
+# held in RAM; converting to a data URI reads it back and base64 inflates it
+# ~1.33x, which undoes that. Cap each upload so a mistaken 2GB POST fails fast
+# instead of being buffered and encoded before the gateway rejects it.
+_MAX_IMAGE_BYTES: int = int(os.environ.get("BLOCKRUN_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
+# A resource guard, not a contract rule: per-model limits (openai/* up to 4,
+# google/* up to 3) stay the gateway's call so this can't drift as the catalog
+# changes. This only bounds how much we buffer before it gets to say so.
+_MAX_IMAGE_PARTS: int = int(os.environ.get("BLOCKRUN_MAX_IMAGE_PARTS", "16"))
+
+
 async def _image_form_value(value: Any, field: str) -> str:
     """Convert a multipart image upload (or an existing data URI) to a data URI."""
     if isinstance(value, str):
@@ -754,10 +781,16 @@ async def _image_form_value(value: Any, field: str) -> str:
     read = getattr(value, "read", None)
     if read is None:
         raise HTTPException(400, f"`{field}` must be an image upload or data URI")
-    raw = await read()
     content_type = getattr(value, "content_type", None) or "application/octet-stream"
     if not content_type.startswith("image/"):
         raise HTTPException(400, f"`{field}` must have an image content type")
+    # Check the spooled size before read() pulls the whole thing into memory.
+    size = getattr(value, "size", None)
+    if isinstance(size, int) and size > _MAX_IMAGE_BYTES:
+        raise HTTPException(413, f"`{field}` exceeds the {_MAX_IMAGE_BYTES} byte upload limit")
+    raw = await read()
+    if len(raw) > _MAX_IMAGE_BYTES:
+        raise HTTPException(413, f"`{field}` exceeds the {_MAX_IMAGE_BYTES} byte upload limit")
     return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
@@ -775,6 +808,10 @@ async def image_edits(request: Request) -> Any:
         values = list(form.getlist("image")) + list(form.getlist("image[]"))
         if not values:
             raise HTTPException(400, "`image` is required")
+        if len(values) > _MAX_IMAGE_PARTS:
+            raise HTTPException(
+                400, f"at most {_MAX_IMAGE_PARTS} image parts (got {len(values)})"
+            )
         images = [await _image_form_value(value, "image") for value in values]
         image: Any = images[0] if len(images) == 1 else images
         mask_value = form.get("mask")
@@ -795,8 +832,14 @@ async def image_edits(request: Request) -> Any:
         quality = body.get("quality")
         n_raw = body.get("n", 1)
 
-    if not prompt:
-        raise HTTPException(400, "`prompt` is required")
+    # Must be a *string*, not merely truthy. A `prompt` sent as a multipart file
+    # part arrives as an UploadFile, which is truthy — str() would then bill
+    # "UploadFile(filename='p.txt', ...)" as the generation prompt.
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(400, "`prompt` is required and must be text")
+    _require_image_payload(image, "image")
+    if mask is not None:
+        _require_image_payload(mask, "mask")
     try:
         n = int(n_raw)
     except (TypeError, ValueError):
@@ -806,7 +849,7 @@ async def image_edits(request: Request) -> Any:
         request.url.path,
         model if isinstance(model, str) else None,
         lambda: _adapter.image_edit_async(
-            prompt=str(prompt),
+            prompt=prompt,
             image=image,
             model=model if isinstance(model, str) else None,
             mask=mask,

@@ -36,6 +36,24 @@
   now real (SDK 1.7.0); reference-to-video stays out because both gateways gate
   it behind `R2V_ENABLED` and return 503.
 
+- **A `prompt` sent as a multipart file part was billed as a Python repr.**
+  `UploadFile` is truthy, so the required-field check passed and `str()` sent
+  `"UploadFile(filename='p.txt', ...)"` upstream as the prompt — a paid
+  generation against garbage, returning 200. `prompt` must now be non-blank
+  text.
+- **Non-string `image`/`mask` payloads on the JSON path** were forwarded
+  verbatim for the gateway to reject; they are refused locally now.
+
+### Security / limits
+
+- **Multipart uploads are capped** — `BLOCKRUN_MAX_IMAGE_BYTES` (default 12MB,
+  → 413) and `BLOCKRUN_MAX_IMAGE_PARTS` (default 16, → 400). Starlette spools
+  large bodies to disk to keep them out of RAM; converting to a data URI reads
+  them back and base64 inflates them ~1.33x, so an unbounded POST was fully
+  buffered and encoded before the gateway could reject it. The part cap is a
+  buffering guard only — per-model limits (openai/* up to 4, google/* up to 3)
+  stay the gateway's call so they can't drift as the catalog changes.
+
 ### Testing
 
 - `tests/test_sdk_param_contract.py` binds every forwarded param against the
@@ -44,6 +62,13 @@
   a surface that could not work; this contract test is what catches that class
   of bug. It also pins the Base-rejects-`quality` asymmetry so a future SDK
   change fails loudly instead of leaving the adapter's guard stale.
+
+  Note the file needs **two** techniques: closed signatures (`VideoClient`, the
+  Solana clients) can be read with `inspect`, but `ImageClient` declares
+  `**kwargs` and validates at runtime, so it must be probed by *calling*.
+  Reading it instead — the first attempt here — made the Base assertions
+  unreachable, leaving the anti-vacuous-test file vacuous in exactly the way it
+  exists to prevent.
 
 ## 0.6.1 — 2026-07-15
 

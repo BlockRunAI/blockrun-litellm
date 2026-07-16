@@ -203,11 +203,12 @@ def test_image_generation_sync_dispatches_to_solana_image(monkeypatch):
 
 
 def test_base_image_generation_omits_none_values(monkeypatch):
-    """Omit unset optionals rather than passing None.
+    """Unset optionals must be *omitted*, not passed as None.
 
-    The SDK image clients have closed signatures — ``ImageClient.generate``
-    raises TypeError on any kwarg it doesn't name — so the adapter must send
-    only what the caller actually set.
+    Capture the kwargs actually supplied rather than the resolved parameter
+    values: a fake whose own defaults are None reports ``size=None`` whether the
+    adapter omitted it or passed it explicitly, so it cannot observe the very
+    behaviour this test is named for. **kwargs sees only what was sent.
     """
     captured: dict[str, Any] = {}
 
@@ -216,20 +217,16 @@ def test_base_image_generation_omits_none_values(monkeypatch):
             return {"data": [{"url": "https://example/img.png"}]}
 
     class FakeBaseClient:
-        def generate(self, prompt, *, model=None, size=None, n=1):
-            captured.update(prompt=prompt, model=model, size=size, n=n)
+        def generate(self, prompt, **kwargs):
+            captured.update(prompt=prompt, **kwargs)
             return FakeResponse()
 
     client = FakeBaseClient()
     monkeypatch.setattr(_adapter, "get_image_client", lambda **_: client)
 
     _adapter.image_generation_sync("a cat", model="google/nano-banana")
-    assert captured == {
-        "prompt": "a cat",
-        "model": "google/nano-banana",
-        "size": None,
-        "n": 1,
-    }
+    assert captured == {"prompt": "a cat", "model": "google/nano-banana", "n": 1}
+    assert "size" not in captured  # omitted, not sent as None
 
 
 @pytest.mark.asyncio
