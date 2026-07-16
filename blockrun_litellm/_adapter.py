@@ -47,6 +47,22 @@ SOLANA_API_URL = "https://sol.blockrun.ai/api"
 BASE_API_URL = "https://blockrun.ai/api"
 
 
+def _canonical_video_model(model: Optional[str]) -> Optional[str]:
+    """Normalize the short Seedance ids accepted by OpenAI-style clients.
+
+    Token360 documents ``seedance-2.0-fast`` while BlockRun's gateway catalog
+    uses canonical provider-qualified ids.  The proxy must bridge that naming
+    difference before calling the SDK's flat ``/videos/generations`` surface.
+
+    The id is lowercased on the way through: the catalog lookup is an exact
+    ``==`` match, so a case-preserved ``bytedance/Seedance-2.0-Fast`` would 400
+    just like the bare id it replaced.
+    """
+    if isinstance(model, str) and model.lower().startswith("seedance-"):
+        return f"bytedance/{model.lower()}"
+    return model
+
+
 def _is_solana_url(api_url: Optional[str]) -> bool:
     """Sniff whether the effective gateway URL points at Solana.
 
@@ -729,6 +745,7 @@ async def video_generation_async(
     server cap so a request body can't pin a worker thread indefinitely; a
     malformed (non-numeric) value raises ValueError → HTTP 400 at the proxy."""
     client = get_video_client(api_url=api_url, private_key=private_key)
+    model = _canonical_video_model(model)
     params = {k: v for k, v in params.items() if v is not None}
     for knob in ("budget_seconds", "timeout"):
         if knob in params:
