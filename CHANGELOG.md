@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.7.5 — 2026-07-16
+
+Documentation only — runtime code is byte-identical to 0.7.3 and 0.7.4.
+
+### Fixed
+
+- **0.7.4's "correction" was itself wrong.** It claimed "BlockRun's gateways
+  settle **on success** ... so a request that dies at the provider settles
+  nothing and costs the caller nothing." That is true for **Base** and false for
+  **Solana**, which settles **optimistically**:
+
+  ```ts
+  // Optimistic settlement (DEFAULT) — fire settle in parallel with the
+  // 10-60s edit so it lands inside Solana's ~60-90s blockhash window.
+  const settlementPromise = settlePaymentWithRetry(paymentHeader, priceUsd);
+  ```
+
+  Settle fires *before* the outcome is known, so a payload that passes
+  verification and then fails upstream **is charged** — the gateway logs it as a
+  paid error with a real tx hash. This is systemic on Solana:
+  `images/generations`, `image2image`, `messages`, `search`, and
+  `audio/generations` all settle this way.
+
+  | | Base | Solana |
+  |---|---|---|
+  | settle timing | after the upstream call, success only | in parallel, before the outcome |
+  | failed request | costs nothing | **can be charged** |
+
+  So the `n` bound (0.7.2) is the difference between a local 400 and a real
+  debit for an image that never existed — **on Solana**. On Base it saves a
+  pointless signed round-trip. Worth having either way; only the stakes differ.
+
+  **How this went wrong twice.** 0.7.2 claimed the loss was universal (right for
+  Solana, wrong for Base). 0.7.4 claimed it never happened (right for Base,
+  wrong for Solana) — I verified Base's settle ordering and generalized to "the
+  gateways" without checking Solana. Each pass corrected a half-truth into the
+  opposite half-truth. The chains genuinely differ; any single sentence about
+  "the gateways" and settlement is wrong about one of them.
+
+  Related: blockrun-llm 1.7.1 stops asserting "payment likely not taken" on a
+  failed paid request for exactly this reason — on Solana, absence of a
+  settlement header and *having been charged* co-occur systematically, because
+  the error path returns before settle lands and carries no header.
+
 ## 0.7.4 — 2026-07-16
 
 Documentation only — runtime code is byte-identical to 0.7.3. Released so the
@@ -92,15 +136,14 @@ test that couldn't fail.
   provider. (Solana already bounds it. The gateway-side fix belongs in
   `blockrun`; this closes it at the sidecar for both chains today.)
 
-  **Correction (2026-07-16):** as first published, this entry said the round-trip
-  "lost the prepaid USDC". That is wrong, and the claim shipped in 0.7.2.
-  BlockRun's gateways settle **on success** — `settlePaymentWithRetry` runs after
-  the upstream call — so a request that dies at the provider settles nothing and
-  costs the caller nothing. The bound is still worth having: it saves a pointless
-  signed round-trip, a facilitator verify, and an upstream call, and returns a
-  clean local 400. It just was never about losing money. The error was inherited
-  from the SDK's `"API error after payment"` wording, which reads as *funds gone*
-  on failures that took nothing (fixed in blockrun-llm#25).
+  **Correction (2026-07-16, superseded — see 0.7.5):** as first published this
+  entry said the round-trip "lost the prepaid USDC", which is right for Solana
+  and wrong for Base. The 0.7.4 correction then claimed the opposite —
+  universally no loss — which is right for Base and wrong for Solana. Both
+  passes collapsed two genuinely different gateways into one sentence. The real
+  split: **Base** settles after the upstream call (a failed request costs
+  nothing); **Solana** settles optimistically, in parallel (a failed request
+  **can be charged**). 0.7.5 has the details.
 
 - **Post-settlement parse failures no longer answer 400 or skip the audit log.**
   `pydantic.ValidationError` subclasses `ValueError`, and the SDK builds its
