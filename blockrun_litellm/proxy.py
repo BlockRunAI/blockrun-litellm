@@ -563,7 +563,7 @@ async def _forward_passthrough(
                     return JSONResponse(status_code=503, content={"error": _solana_rpc_msg(exc)})
                 raise
 
-        # The real x402 charge rides on the upstream response's X-PAYMENT-RESPONSE
+        # The real x402 charge rides on the upstream response's PAYMENT-RESPONSE
         # header — readable now, before we drain the body.
         cost, settlement = _proxy_cost_from_headers(resp.headers)
 
@@ -581,6 +581,12 @@ async def _forward_passthrough(
                 settlement=settlement,
                 latency_ms=_latency_ms(),
                 request_id=req_id,
+                # Reading the header only helps when there IS one. Solana chat
+                # settles in parallel and, on failure, logs "CHARGED BUT REQUEST
+                # FAILED — refund manually" and throws: the error response
+                # carries no settlement header at all. Without this the
+                # highest-volume paid route records a real charge as $0.
+                settlement_status=_settlement_status(resp.status_code, settlement),
             )
             return Response(
                 content=body,
@@ -597,6 +603,9 @@ async def _forward_passthrough(
             settlement=settlement,
             latency_ms=_latency_ms(),
             request_id=req_id,
+            # A no-op on this arm (the branch above took every >=400), but every
+            # log site computes it — the one that didn't is how /v1/videos drifted.
+            settlement_status=_settlement_status(resp.status_code, settlement),
         )
 
         def _drain():
@@ -643,6 +652,10 @@ async def _forward_passthrough(
         settlement=settlement,
         latency_ms=_latency_ms(),
         request_id=req_id,
+        # Same reason as the streaming arm above: on Solana a failed paid call
+        # can be charged and answer without a settlement header, so a bare
+        # cost_usd=None here would read as free.
+        settlement_status=_settlement_status(status, settlement),
     )
     return Response(
         content=content,
@@ -681,10 +694,98 @@ async def _json_body(request: Request) -> Dict[str, Any]:
 
 def _media_settlement(result: Any) -> Optional[Dict[str, Any]]:
     """Media SDK responses carry the x402 tx hash in-body (``txHash``) rather
-    than via the X-PAYMENT-RESPONSE header; normalise to the settlement shape
+    than via the PAYMENT-RESPONSE header; normalise to the settlement shape
     :func:`decode_settlement_header` produces so audit rows stay uniform."""
     if isinstance(result, dict) and result.get("txHash"):
         return {"tx_hash": result["txHash"]}
+    return None
+
+
+def _settlement_status(
+    http_status: int,
+    settlement: Optional[Dict[str, Any]],
+    *,
+    parse_failed_after_settlement: bool = False,
+    reached_gateway: bool = True,
+    is_solana: Optional[bool] = None,
+) -> Optional[str]:
+    """Was this failure free, or might it have cost money? Returns None or "unknown".
+
+    ``cost_usd=None`` cannot answer that on its own — it reads as "$0" and is
+    also what we log when we simply don't know. A ledger that quietly under-
+    reports spend is worse than one that admits a gap, so say which it is.
+
+    Whether a failed paid call settles is the gateway's decision, and the two
+    gateways are opposites:
+
+    * **Base media routes** settle only after a successful upstream call
+      (verified: images/generations:333, audio/generations:423, audio/speech:292,
+      image2image:389), so a failure settles nothing. Same for non-streaming
+      chat. Base *streaming* chat is the exception — it settles inside
+      ``metadata.then(...)``, which resolves even when the stream loop's catch
+      fires, so a stream that opens and then dies IS charged. That can't reach
+      this function: a mid-stream death never produces a >=400 row (the 200 was
+      logged when the headers arrived), and a >=400 at header time means the
+      stream never ran. Noted so the "Base failures are free" line isn't later
+      read as license it doesn't grant.
+    * **Solana** settles *optimistically* on chat, search, both image routes and
+      music: settle fires in parallel with the upstream work, so a call that
+      verifies and then fails **is charged** — and the error response carries no
+      settlement header, so "no proof" and "you were charged" co-occur exactly
+      when it matters.
+
+    **Any** Solana failure is flagged, not just 5xx. An earlier cut gated on
+    ``>= 500``, reasoning that a 4xx is the gateway refusing before settle. That
+    is false and it was the most expensive kind of wrong: the settle fires
+    first, so a content-filter rejection comes back **400** (blockrun-sol
+    images/generations:376) and a rate limit **429** (:359) — both charged, both
+    routine, both client-triggerable. 402 is not exempt either: Solana settles at
+    POST, and the poll route returns 402 on wallet-binding failure *after* the
+    money moved (images/generations/[id]:74 "the POST already settled").
+
+    On Base, a 504 is flagged too: it's our own await ceiling (``_run_media``),
+    which abandons the wait but leaves the worker running — so the call can
+    complete and settle after we've answered.
+
+    ``parse_failed_after_settlement`` covers what bites on *both* chains: the
+    gateway settled, returned 200, and the body wouldn't parse.
+
+    ``reached_gateway=False`` is the one exemption from the Solana rule, and it
+    is a proof rather than a guess: the SDK's own request validation raises
+    before anything goes on the wire, so there is no payment to wonder about.
+    Everything else that failed left this process, and on Solana that is enough
+    to be unsure.
+
+    ``is_solana`` should be the chain the call actually ran on, snapshotted when
+    it started. Resolving it here would re-read ``BLOCKRUN_API_URL`` — a mutable
+    global — minutes later on a long media call, and if it changed in flight a
+    Solana charge would be classified as Base and written off as free. Defaults
+    to resolving now for callers whose request is short enough that it cannot
+    drift.
+
+    Deliberately one bit of chain rather than a per-route table of which Solana
+    endpoints settle optimistically — that table lives in the gateway and would
+    drift here. The asymmetry decides it: a false "unknown" costs a glance at the
+    ledger; a false "$0" loses a real charge. Solana's video route settles on the
+    completed poll and will be flagged for nothing. That is the trade, on purpose.
+    """
+    if settlement and settlement.get("tx_hash"):
+        # Proven settled: the row already carries the tx hash and the real cost,
+        # so there is nothing to go looking for. Dead weight when called from
+        # _media_endpoint (``result`` is None on every error arm there), but live
+        # for the passthrough, which reads the settlement header off the response
+        # and so CAN see a settled error.
+        return None
+    if http_status < 400:
+        return None  # succeeded — nothing failed, nothing to reconcile
+    if parse_failed_after_settlement:
+        return "unknown"  # settle already ran; only the parse failed
+    if not reached_gateway:
+        return None  # SDK refused it locally — nothing was ever sent to pay for
+    if _adapter._is_solana_url(None) if is_solana is None else is_solana:
+        return "unknown"  # optimistic settle: ANY failure here may be charged
+    if http_status == 504:
+        return "unknown"  # our await ceiling; the worker may still settle
     return None
 
 
@@ -707,22 +808,40 @@ async def _media_endpoint(
     (cost_usd=None); the settlement tx hash from the response body is logged
     and surfaced via the x-blockrun-settlement header.
 
-    ``ValidationError`` is caught FIRST and deliberately: pydantic's subclasses
-    ``ValueError``, and the SDK builds its response model *after* settlement. So
-    a gateway that takes payment and then returns an unparseable body would fall
-    into the ValueError arm — answering 400, blaming the caller for a request
-    they already paid for, and returning via ``raise`` before log_proxy_call ever
-    runs, keeping real spend out of reconciliation. It is upstream's fault, not
-    the caller's: 502, and logged like every other settled outcome.
+    **Every exit logs.** That is the invariant, and it is load-bearing: a media
+    call that moves money and leaves no audit row is invisible to reconciliation,
+    which is worse than one recorded with an unknown cost. So no arm here
+    ``raise``s past ``log_proxy_call`` — each sets ``status``/``payload`` and
+    falls through — and a trailing ``except Exception`` catches what the SDK
+    lets escape unwrapped (transport timeouts on long media calls).
+
+    ``ValidationError`` and ``JSONDecodeError`` are caught FIRST and
+    deliberately: both subclass ``ValueError``, and both mean the gateway
+    answered 200 (settle already ran) and the SDK couldn't read the body. Left to
+    the ValueError arm they'd answer 400 — blaming the caller for a call they
+    paid for. It is upstream's fault: 502, flagged, and logged.
     """
     _t0 = time.monotonic()
     req_id = uuid.uuid4().hex
     result: Optional[Dict[str, Any]] = None
+    parse_failed_after_settlement = False
+    reached_gateway = True
+    # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
+    # global and these calls run for minutes. If it flipped mid-flight we would
+    # classify a Solana charge as Base and write it off as free.
+    is_solana = _adapter._is_solana_url(None)
     async with _get_media_semaphore():
         try:
             result = await call()
             status, payload = 200, result
-        except ValidationError as exc:
+        except (ValidationError, _json.JSONDecodeError) as exc:
+            # Both mean the gateway answered 200 and the SDK couldn't read it —
+            # settle already ran. JSONDecodeError has to be caught alongside
+            # ValidationError and *before* ValueError: both subclass it, and the
+            # SDK parses the paid 200 with a bare ``.json()``, so a truncated
+            # body would otherwise land in the ValueError arm below — 400,
+            # blaming the caller for a call they paid for.
+            parse_failed_after_settlement = True
             status = 502
             payload = {
                 "error": "Upstream returned a response the SDK could not parse. "
@@ -730,12 +849,31 @@ async def _media_endpoint(
                 "detail": str(exc)[:500],
             }
         except ValueError as exc:
-            raise HTTPException(400, str(exc))
+            # SDK request validation (lyrics + instrumental, bad enum). Raised
+            # before anything goes on the wire, so nothing could have been paid —
+            # the one failure we can call free on Solana without guessing.
+            # Set status/payload rather than raise: every exit from here must
+            # reach log_proxy_call below, and `raise` skips it.
+            reached_gateway = False
+            status, payload = 400, {"detail": str(exc)}
         except PaymentError as exc:
             status, payload = 402, _payment_error_payload(exc)
         except APIError as exc:
             status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
             payload = {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - a missing row is worse than a broad catch
+            # Transport errors (httpx.ReadTimeout on a 10-minute image call,
+            # connection resets) escape the SDK unwrapped. If one lands after the
+            # payment header went out, money may have moved — and without this
+            # arm the request left no audit row at all, which is strictly worse
+            # than an unflagged one. "We don't know" is exactly the answer.
+            parse_failed_after_settlement = True
+            status = 502
+            payload = {
+                "error": f"Media call failed in transport: {type(exc).__name__}. "
+                "The call may already have settled — check the audit log.",
+                "detail": str(exc)[:500],
+            }
     settlement = _media_settlement(result)
     _logger.log_proxy_call(
         model=model,
@@ -746,6 +884,13 @@ async def _media_endpoint(
         settlement=settlement,
         latency_ms=(time.monotonic() - _t0) * 1000.0,
         request_id=req_id,
+        settlement_status=_settlement_status(
+            status,
+            settlement,
+            parse_failed_after_settlement=parse_failed_after_settlement,
+            reached_gateway=reached_gateway,
+            is_solana=is_solana,
+        ),
     )
     headers = _cost_response_headers(None, settlement)
     if warning:
@@ -1187,6 +1332,13 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
     so a poller sees status=failed instead of a hung queue."""
     _t0 = time.monotonic()
     status = 200
+    result: Optional[Dict[str, Any]] = None
+    parse_failed_after_settlement = False
+    reached_gateway = True
+    # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
+    # global and these calls run for minutes. If it flipped mid-flight we would
+    # classify a Solana charge as Base and write it off as free.
+    is_solana = _adapter._is_solana_url(None)
     async with _get_media_semaphore():
         job["status"] = "in_progress"
         try:
@@ -1200,7 +1352,17 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
             duration = clips[0].get("duration_seconds") if clips else None
             if duration is not None:
                 job["seconds"] = duration
+        except (ValidationError, _json.JSONDecodeError) as exc:
+            # Same ordering _media_endpoint documents, and for the same reason:
+            # both subclass ValueError, and both mean the gateway settled and
+            # answered 200 with a body the SDK couldn't read. Left to the arm
+            # below they'd log a 400 with no flag — a settled call recorded as a
+            # caller mistake. This site drifted from its sibling once already.
+            parse_failed_after_settlement = True
+            job["status"], status = "failed", 502
+            job["error"] = {"code": "upstream_error", "message": str(exc)[:500]}
         except ValueError as exc:
+            reached_gateway = False  # SDK refused it before anything was sent
             job["status"], status = "failed", 400
             job["error"] = {"code": "invalid_request", "message": str(exc)}
         except PaymentError as exc:
@@ -1212,17 +1374,26 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
             job["error"] = {"code": "upstream_error", "message": str(exc)}
         except Exception as exc:  # noqa: BLE001 - background task must not die silently
             log.exception("video job %s crashed", job["id"])
+            parse_failed_after_settlement = True  # transport died; may have settled
             job["status"], status = "failed", 500
             job["error"] = {"code": "server_error", "message": str(exc)}
+    settlement = _video_job_settlement(job)
     _logger.log_proxy_call(
         model=job["model"],
         path="/v1/videos",
         stream=False,
         http_status=status,
         cost_usd=None,
-        settlement=_video_job_settlement(job),
+        settlement=settlement,
         latency_ms=(time.monotonic() - _t0) * 1000.0,
         request_id=job["id"],
+        settlement_status=_settlement_status(
+            status,
+            settlement,
+            parse_failed_after_settlement=parse_failed_after_settlement,
+            reached_gateway=reached_gateway,
+            is_solana=is_solana,
+        ),
     )
 
 
