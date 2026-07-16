@@ -34,10 +34,10 @@ ROUTES = [
     ("/v1/audio/sound-effects", "sound_effect_async", {"text": "boom"}),
 ]
 
-# The image routes deliberately keep `_optional_str` semantics for `model`
-# (blank → unset → gateway default). Only the routes below treat a blank `model`
-# as a caller bug — see `_require_named_model`.
-MODEL_NAMED_ROUTES = [r for r in ROUTES if not r[0].startswith("/v1/images/")]
+# Every JSON route that names a billed model refuses a blank one. The multipart
+# `/v1/images/edits` branch is the one exception (a form spells "unset" as "") —
+# covered separately by test_multipart_blank_model_still_means_unset.
+MODEL_NAMED_ROUTES = ROUTES
 
 OK_RESULT: Dict[str, Any] = {
     "created": 1_700_000_000,
@@ -102,6 +102,20 @@ class TestValidation:
         # Omitting `model` stays documented and free — only a *blank* one is a bug.
         mock = _mock_adapter(monkeypatch, fn, return_value=dict(OK_RESULT))
         r = client.post(route, json=body)
+        assert r.status_code == 200
+        assert mock.await_args.kwargs["model"] is None
+
+    def test_multipart_blank_model_still_means_unset(self, client, monkeypatch):
+        """The deliberate exception to the rule above: a form emits every field
+        it knows about, so a blank `model=` is how "unset" is spelled on the
+        wire — not the caller bug an empty JSON field is. Refusing it here would
+        break form clients that work today."""
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        r = client.post(
+            "/v1/images/edits",
+            data={"prompt": "make it green", "model": ""},
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        )
         assert r.status_code == 200
         assert mock.await_args.kwargs["model"] is None
 
@@ -456,16 +470,18 @@ class TestArgumentForwarding:
         assert mock.call_args.kwargs["n"] == 10
 
     def test_blank_optional_strings_are_unset_not_empty(self, client, monkeypatch):
-        """Blank size/model reached the SDK as "" before: Base billed a default
-        image, Solana 400'd. Same input, different chain, neither intended.
+        """Blank size reached the SDK as "" before: Base billed a default image,
+        Solana 400'd. Same input, different chain, neither intended.
+
+        `model` used to be asserted here too, and 0.7.3 split it out: "unset" is
+        free for `size` but not for `model`, which the SDK coalesces into a billed
+        default. A blank JSON `model` now 400s — see
+        TestValidation::test_blank_model_400_and_never_dispatched.
         """
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
-        response = client.post(
-            "/v1/images/generations", json={"prompt": "a", "size": "", "model": "  "}
-        )
+        response = client.post("/v1/images/generations", json={"prompt": "a", "size": ""})
         assert response.status_code == 200
         assert mock.call_args.kwargs["size"] is None
-        assert mock.call_args.kwargs["model"] is None
 
     def test_blank_multipart_mask_is_unset(self, client, monkeypatch):
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))

@@ -11,12 +11,19 @@
   model, and **charged for it** (~$0.40 for the 8s Grok video default). The
   gateway can't catch it: its schema is `z.string().default(...)`, and a zod
   default only fires when the key is *absent*, so a present-but-empty string
-  sails through. `/v1/videos/generations`, `/v1/videos`, `/v1/audio/speech`,
-  `/v1/audio/generations`, and `/v1/audio/sound-effects` now refuse it with a
-  400 before dispatch. Omitting `model` still opts into the default and is
-  unchanged. The image routes keep 0.7.2's `_optional_str` semantics (blank →
-  unset → default) and are untouched here; that inconsistency is deliberate for
-  now rather than an oversight.
+  sails through. Every JSON route that names a billed model now refuses it with
+  a 400 before dispatch: `/v1/videos/generations`, `/v1/videos`,
+  `/v1/audio/speech`, `/v1/audio/generations`, `/v1/audio/sound-effects`, plus
+  `/v1/images/generations` and `/v1/images/edits`. Omitting `model` still opts
+  into the default and is unchanged.
+
+  The multipart `/v1/images/edits` branch is the deliberate exception: transport
+  decides what `""` means. A form emits every field it knows about, so a blank
+  one is how "unset" is spelled on the wire — the same reason a blank `mask=` is
+  nulled there, and what the Solana gateway's own multipart handler does. A blank
+  in a JSON body has no such excuse. 0.7.2 read blank `model` as "unset"
+  everywhere; that was right for `size` (unset is free) and wrong for `model`
+  (unset is billed), so the two split here.
 
 ### Added
 

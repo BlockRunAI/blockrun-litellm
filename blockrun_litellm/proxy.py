@@ -791,10 +791,15 @@ def _require_named_model(value: Any) -> Optional[str]:
     """Absent → None (the gateway default applies); present-but-blank → 400.
 
     `_require_optional_str` folds a blank string into "not set", which is right
-    for a field the caller may legitimately omit. `model` on the media routes is
-    the exception, because "not set" is not free here: the SDK coalesces with
+    for a field the caller may legitimately omit. `model` on a JSON body is the
+    exception, because "not set" is not free here: the SDK coalesces with
     `model or DEFAULT_MODEL`, so a blank string is falsy, silently becomes the
     default model, and **bills for it** — ~$0.40 for the 8s Grok video default.
+
+    Every JSON route that names a billed model uses this. The multipart
+    `/v1/images/edits` branch deliberately does not: a form emits every field it
+    knows about, so a blank there really does mean "unset" (see the comment at
+    that call site). Transport decides what `""` means; JSON has no such excuse.
 
     The gateway can't catch this on our behalf: its schema is
     `z.string().default(...)`, and a zod default only fires when the key is
@@ -866,7 +871,7 @@ async def image_generations(request: Request) -> Any:
         raise HTTPException(400, "`prompt` is required and must be text")
 
     n = _require_image_n(body.get("n", 1))
-    model = _require_optional_str(body.get("model"), "model")
+    model = _require_named_model(body.get("model"))
     size = _require_optional_str(body.get("size"), "size")
     quality, warning = _image_quality(body.get("quality"))
     return await _media_endpoint(
@@ -974,6 +979,13 @@ async def image_edits(request: Request) -> Any:
         if isinstance(mask_value, str) and not mask_value.strip():
             mask_value = None
         mask = await _image_form_value(mask_value, "mask") if mask_value is not None else None
+        # Blank `model` stays "not set" HERE, unlike every JSON path, which
+        # refuses it (see _require_named_model). The transport changes what an
+        # empty string means: a form emits every field it knows about, so a blank
+        # one is how "unset" is spelled on the wire — the same reason `mask` is
+        # nulled just above, and what the Solana gateway's own multipart handler
+        # does. A blank in a JSON body has no such excuse; it's a caller
+        # templating a variable that wasn't set.
         model = _require_optional_str(form.get("model"), "model")
         size = _require_optional_str(form.get("size"), "size")
         quality_raw = form.get("quality")
@@ -995,7 +1007,7 @@ async def image_edits(request: Request) -> Any:
         if image is None:
             raise HTTPException(400, "`image` is required")
         mask = body.get("mask")
-        model = _require_optional_str(body.get("model"), "model")
+        model = _require_named_model(body.get("model"))
         size = _require_optional_str(body.get("size"), "size")
         quality_raw = body.get("quality")
         n_raw = body.get("n", 1)
