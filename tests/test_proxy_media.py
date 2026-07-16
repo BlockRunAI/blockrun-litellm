@@ -239,3 +239,29 @@ class TestArgumentForwarding:
         images = mock.call_args.kwargs["image"]
         assert len(images) == 2
         assert all(value.startswith("data:image/png;base64,") for value in images)
+
+    def test_blank_quality_is_treated_as_unset(self, client, monkeypatch):
+        """A blank field means "not set", not "set to empty".
+
+        Multipart clients routinely emit every optional field, blank ones
+        included. Without normalization a blank `quality` would reach the
+        Solana-only guard and 400 about a parameter the caller never sent.
+        """
+        mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
+        for blank in ("", "   "):
+            response = client.post(
+                "/v1/images/generations",
+                json={"prompt": "a cat", "quality": blank},
+            )
+            assert response.status_code == 200
+            assert mock.call_args.kwargs["quality"] is None
+
+    def test_blank_quality_multipart_is_treated_as_unset(self, client, monkeypatch):
+        mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
+        response = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, "image/png")},
+            data={"prompt": "make it green", "quality": ""},
+        )
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["quality"] is None

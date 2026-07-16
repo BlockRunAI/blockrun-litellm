@@ -706,6 +706,20 @@ async def _media_endpoint(path: str, model: Optional[str], call: Any) -> Any:
     )
 
 
+def _optional_str(value: Any) -> Optional[str]:
+    """Normalize an optional string field to a value or absence.
+
+    A blank string means "not set", not "set to empty" — multipart clients
+    routinely emit every optional field, blank ones included, and a JSON caller
+    templating `""` means the same thing. Without this, a blank `quality` on
+    Base would trip the Solana-only guard and answer 400 with a message about a
+    parameter the caller never knowingly sent.
+    """
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 @app.post("/v1/images/generations", dependencies=[Depends(_require_token)])
 async def image_generations(request: Request) -> Any:
     body = await _json_body(request)
@@ -728,7 +742,7 @@ async def image_generations(request: Request) -> Any:
             model=model,
             size=body.get("size"),
             n=n,
-            quality=body.get("quality"),
+            quality=_optional_str(body.get("quality")),
         ),
     )
 
@@ -798,7 +812,7 @@ async def image_edits(request: Request) -> Any:
             mask=mask,
             size=size if isinstance(size, str) else None,
             n=n,
-            quality=quality if isinstance(quality, str) else None,
+            quality=_optional_str(quality),
         ),
     )
 
