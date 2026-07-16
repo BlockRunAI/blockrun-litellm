@@ -825,13 +825,19 @@ def _require_named_model(value: Any) -> Optional[str]:
 
 
 def _require_image_n(value: Any) -> int:
-    """Bound `n` locally, before it can cost anything.
+    """Bound `n` locally so a doomed request never reaches the payment dance.
 
     Base's `image2image` gateway schema is `z.number().optional().default(1)` —
-    no int, no bounds — so `n=1000` passes validation, takes payment, and only
-    then 400s at the provider, losing the prepaid USDC. Solana already bounds it
-    (`.int().min(1).max(10)`). 10 is the ceiling the Base *text-to-image* schema
-    uses, whose own comment names this exact loss.
+    no int, no bounds — so `n=1000` passes validation, earns a 402, gets
+    payment-verified, and only then 400s at the provider. Solana already bounds
+    it (`.int().min(1).max(10)`); 10 is the ceiling the Base *text-to-image*
+    schema uses.
+
+    No money is at stake, despite what the t2i schema's comment implies: the
+    gateways settle **on success**, so a request that dies at the provider
+    settles nothing. What this saves is a pointless signed round-trip — a
+    facilitator verify and an upstream call — and it answers 400 locally instead
+    of surfacing the provider's error.
     """
     if isinstance(value, str) and not value.strip():
         return 1  # blank multipart field means "unset"

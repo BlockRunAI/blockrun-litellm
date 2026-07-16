@@ -453,9 +453,12 @@ class TestArgumentForwarding:
             assert response.status_code == 400, f"{field}={bad!r} must not be guessed at"
         mock.assert_not_called()
 
-    def test_n_is_bounded_before_it_can_cost_anything(self, client, monkeypatch):
+    def test_n_is_bounded_before_the_payment_dance(self, client, monkeypatch):
         """Base's image2image gateway schema has no int/bounds on n, so n=1000
-        passes zod, takes payment, then 400s at the provider — prepaid USDC gone.
+        passes zod, earns a 402, gets verified, then 400s at the provider.
+
+        No money is lost — the gateways settle on success — but the round-trip
+        is pure waste, and a local 400 beats the provider's error surfacing late.
         """
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
         for bad in (0, -5, 1000, 11):

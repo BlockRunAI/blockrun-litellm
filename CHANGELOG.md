@@ -63,9 +63,19 @@ test that couldn't fail.
 
 - **`n` is bounded 1–10 before payment.** Base's `image2image` schema is
   `z.number().optional().default(1)` — no int, no bounds — so `n=1000` passed
-  validation, took payment, then 400'd at the provider and lost the prepaid
-  USDC. (Solana already bounds it. The gateway-side fix belongs in `blockrun`;
-  this closes it at the sidecar for both chains today.)
+  validation, earned a 402, got payment-verified, and only then 400'd at the
+  provider. (Solana already bounds it. The gateway-side fix belongs in
+  `blockrun`; this closes it at the sidecar for both chains today.)
+
+  **Correction (2026-07-16):** as first published, this entry said the round-trip
+  "lost the prepaid USDC". That is wrong, and the claim shipped in 0.7.2.
+  BlockRun's gateways settle **on success** — `settlePaymentWithRetry` runs after
+  the upstream call — so a request that dies at the provider settles nothing and
+  costs the caller nothing. The bound is still worth having: it saves a pointless
+  signed round-trip, a facilitator verify, and an upstream call, and returns a
+  clean local 400. It just was never about losing money. The error was inherited
+  from the SDK's `"API error after payment"` wording, which reads as *funds gone*
+  on failures that took nothing (fixed in blockrun-llm#25).
 
 - **Post-settlement parse failures no longer answer 400 or skip the audit log.**
   `pydantic.ValidationError` subclasses `ValueError`, and the SDK builds its
