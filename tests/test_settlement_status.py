@@ -7,9 +7,16 @@ settle fires in parallel with the upstream work — so a call that verifies and
 then fails upstream IS charged. Its error response carries no settlement header,
 so "no proof of payment" and "you were charged" co-occur exactly when it matters.
 
-Base settles only after a successful upstream call, so a failure there is
-genuinely free and must NOT be flagged — a flag on every Base error would be
-noise, and noise gets ignored.
+**Every** Solana failure counts, not just 5xx. The settle fires first, so the
+charged failures come back as 4xx: content filter → 400, rate limit → 429, and a
+poll → 402 after the POST already settled. An earlier cut gated on `>= 500` and
+missed all of them; the tests below exist to keep that from coming back.
+
+Base *media* routes settle only after a successful upstream call, so a failure
+there is genuinely free and must NOT be flagged — noise gets ignored, and an
+ignored flag costs us the Solana signal too. Two Base exceptions: a 504 is our
+own await ceiling (the worker keeps running and can still settle), and a body
+that won't parse means the gateway already settled.
 """
 
 from __future__ import annotations
@@ -28,11 +35,24 @@ from blockrun_llm.types import APIError, PaymentError
 
 import blockrun_litellm.proxy as proxy
 
-OK_RESULT: Dict[str, Any] = {
+# Base settles before responding, so a success carries the tx hash.
+OK_RESULT_BASE: Dict[str, Any] = {
     "created": 1,
     "model": "openai/gpt-image-2",
     "data": [{"url": "https://cdn/x.png"}],
     "txHash": "0xabc",
+}
+
+# Solana settles OPTIMISTICALLY, so at response time there is no tx hash to
+# report — the gateway sends `payment: {status: "settling"}` with the comment
+# "Settlement is optimistic, so there is no tx hash yet". A fixture that carries
+# a 0x hash here is a Base response wearing a Solana label, and it manufactures
+# confidence that Solana successes come with proof of payment. They do not.
+OK_RESULT_SOLANA: Dict[str, Any] = {
+    "created": 1,
+    "model": "openai/gpt-image-2",
+    "data": [{"url": "https://cdn/x.png"}],
+    "payment": {"status": "settling", "network": "solana"},
 }
 
 
@@ -161,14 +181,29 @@ class TestChargedOnBothChains:
 
 
 class TestSuccessRowsUnchanged:
-    @pytest.mark.parametrize("chain", ["base", "solana"])
-    def test_success_carries_the_tx_and_no_flag(self, client, monkeypatch, log_path, chain):
-        (_solana if chain == "solana" else _base)(monkeypatch)
-        response = _call(client, monkeypatch, return_value=dict(OK_RESULT))
+    def test_base_success_carries_the_tx_and_no_flag(self, client, monkeypatch, log_path):
+        _base(monkeypatch)
+        response = _call(client, monkeypatch, return_value=dict(OK_RESULT_BASE))
         assert response.status_code == 200
         row = _last_row(log_path)
         assert "settlement_status" not in row, "proven settled needs no flag — the tx is right there"
         assert row["settlement"]["tx_hash"] == "0xabc"
+
+    def test_solana_success_has_no_tx_and_no_flag(self, client, monkeypatch, log_path):
+        """A real Solana success carries NO tx hash — settle is still in flight.
+
+        So the row is `cost_usd=None, settlement=None`, which looks exactly like
+        a free call. This test exists to state that plainly rather than paper
+        over it with a Base-shaped fixture: `settlement_status` is about
+        *failures*, and it does not fix the fact that successful Solana spend is
+        also absent from this ledger. The gateway's own ledger is the authority.
+        """
+        _solana(monkeypatch)
+        response = _call(client, monkeypatch, return_value=dict(OK_RESULT_SOLANA))
+        assert response.status_code == 200
+        row = _last_row(log_path)
+        assert row["settlement"] is None, "optimistic settle: no tx hash exists yet"
+        assert "settlement_status" not in row, "a success is not the failure case this flags"
 
 
 class TestEveryExitLogs:
@@ -227,3 +262,29 @@ class TestEveryExitLogs:
         row = _last_row(log_path)
         assert row["http_status"] == 400
         assert "settlement_status" not in row, "never reached the gateway — genuinely free"
+
+
+class TestChainIsSnapshotted:
+    def test_env_flip_mid_call_cannot_reclassify_a_solana_charge_as_free(
+        self, client, monkeypatch, log_path
+    ):
+        """BLOCKRUN_API_URL is a mutable global and media calls run for minutes.
+
+        Resolving the chain at LOG time meant a flip in flight would classify a
+        Solana charge as Base and write it off as $0 — the exact false negative
+        this flag exists to prevent, reintroduced by a race.
+        """
+        _solana(monkeypatch)
+
+        async def fail_then_flip(**_kwargs):
+            # The call started on Solana; the env flips to Base before we log.
+            os.environ.pop("BLOCKRUN_API_URL", None)
+            raise APIError("upstream boom", 500)
+
+        monkeypatch.setattr(proxy._adapter, "image_generation_async", fail_then_flip)
+        client.post("/v1/images/generations", json={"prompt": "a cat"})
+
+        assert _last_row(log_path)["settlement_status"] == "unknown", (
+            "the call ran on Solana and may have been charged — a late env read "
+            "must not turn it into a free Base failure"
+        )
