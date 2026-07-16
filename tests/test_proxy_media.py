@@ -457,8 +457,10 @@ class TestArgumentForwarding:
         """Base's image2image gateway schema has no int/bounds on n, so n=1000
         passes zod, earns a 402, gets verified, then 400s at the provider.
 
-        No money is lost — the gateways settle on success — but the round-trip
-        is pure waste, and a local 400 beats the provider's error surfacing late.
+        What that costs depends on the chain: Base settles after the upstream
+        call, so nothing is charged; Solana settles optimistically, in parallel,
+        so a request that fails upstream IS charged. On Solana this bound is the
+        difference between a local 400 and a real debit.
         """
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
         for bad in (0, -5, 1000, 11):

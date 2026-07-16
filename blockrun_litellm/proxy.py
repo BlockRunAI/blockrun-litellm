@@ -833,11 +833,22 @@ def _require_image_n(value: Any) -> int:
     it (`.int().min(1).max(10)`); 10 is the ceiling the Base *text-to-image*
     schema uses.
 
-    No money is at stake, despite what the t2i schema's comment implies: the
-    gateways settle **on success**, so a request that dies at the provider
-    settles nothing. What this saves is a pointless signed round-trip — a
-    facilitator verify and an upstream call — and it answers 400 locally instead
-    of surfacing the provider's error.
+    Whether that costs money depends on the chain, and the two are opposites:
+
+    * **Base** settles only on success — `settlePaymentWithRetry` runs after the
+      upstream call — so a request that dies at the provider settles nothing.
+    * **Solana** settles **optimistically**: settle fires in parallel with the
+      upstream work so it lands inside the ~60-90s blockhash window. A payload
+      that passes verification and then fails upstream **is charged** — the
+      gateway logs it as a paid error with a real tx hash.
+
+    So on Solana this bound is the difference between a local 400 and a real
+    debit for an image that never existed. On Base it saves a pointless signed
+    round-trip. Worth having either way; only the stakes differ.
+
+    (This docstring has been wrong twice: first claiming the loss was universal,
+    then that it never happened. The gateways genuinely differ — don't collapse
+    them into one sentence again.)
     """
     if isinstance(value, str) and not value.strip():
         return 1  # blank multipart field means "unset"
