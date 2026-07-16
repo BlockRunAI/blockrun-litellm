@@ -284,6 +284,7 @@ def log_proxy_call(
     settlement: Optional[Dict[str, Any]],
     latency_ms: Optional[float],
     request_id: Optional[str] = None,
+    settlement_status: Optional[str] = None,
 ) -> None:
     """Append a JSONL audit row for a raw FastAPI sidecar passthrough call.
 
@@ -291,9 +292,21 @@ def log_proxy_call(
     audit hook for ``/v1/chat/completions`` + ``/v1/messages``. **Opt-in** via
     ``BLOCKRUN_LITELLM_LOG`` — unset means the sidecar never touches disk (no
     surprise writes to ``~/.blockrun``). ``cost_usd`` is the real x402 charge
-    decoded from the gateway's ``X-PAYMENT-RESPONSE`` header (``None`` for free /
+    decoded from the gateway's ``PAYMENT-RESPONSE`` header (``None`` for free /
     cached calls); the row mirrors the custom-provider schema with a
     ``mode='proxy_passthrough'`` marker so both sources coexist in one file.
+
+    ``settlement_status`` distinguishes "this cost nothing" from "we don't know
+    what this cost" — a distinction ``cost_usd=None`` alone cannot carry:
+
+    * ``None``      — nothing to flag (a success, or a failure that never paid).
+    * ``"unknown"`` — the call reached the gateway with payment and failed, on a
+      chain where that can still settle. Do not read ``cost_usd=None`` as $0;
+      confirm against the gateway ledger, which is the authority.
+
+    Without this a Solana charge for a failed call is indistinguishable from a
+    free failure, and a ledger that silently under-reports spend is worse than
+    one that admits a gap.
     """
     if not os.environ.get("BLOCKRUN_LITELLM_LOG"):
         return
@@ -315,6 +328,10 @@ def log_proxy_call(
             "settlement": settlement,
             "request_id": request_id,
         }
+        # Omitted when there's nothing to flag, so existing rows keep their shape
+        # and anything parsing this file sees the key only when it means something.
+        if settlement_status is not None:
+            entry["settlement_status"] = settlement_status
         _write_entry(_resolve_path(), entry)
     except Exception:  # pragma: no cover - logging never breaks the proxy
         pass

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.6 — 2026-07-16
+
+### Fixed
+
+- **A failed call is no longer logged as free when it might have been charged.**
+  `cost_usd=None` reads as "$0", but it is also what the sidecar writes when it
+  simply doesn't know — and on Solana those are different facts worth real
+  money. Several Solana routes (chat, search, both image routes, music) settle
+  **optimistically**: settle fires in parallel with the upstream work, so a call
+  that verifies and then fails upstream **is charged**, and its error response
+  carries no settlement header. "No proof of payment" and "you were charged"
+  therefore co-occur exactly when it matters.
+
+  The audit row now carries `settlement_status: "unknown"` in that case, so
+  reconciliation investigates instead of trusting a zero. Base failures are
+  **not** flagged — Base settles only after a successful upstream call, so a
+  failure there is genuinely free, and a flag on every Base error would be noise.
+
+  One case is flagged on **both** chains: the gateway settles, returns 200, and
+  the SDK cannot parse the body (`ValidationError` → 502). The money moved
+  regardless of chain.
+
+  The check is one bit of chain, not a table of which Solana routes settle
+  optimistically — that table lives in the gateway and would drift here. The
+  asymmetry decides it: a false "unknown" costs a glance at the ledger, a false
+  "$0" loses a real charge. Solana's video route settles on the completed poll
+  and will occasionally be flagged for nothing; that is the trade, taken on
+  purpose.
+
+  Only the media routes needed this. The chat passthrough proxies raw responses
+  and already reads cost/settlement from headers even on errors; the media
+  routes go through the SDK, which raises, so the sidecar never sees a response
+  at all.
+
+  The gateway ledger remains the authority on what actually settled — this flag
+  says "go look", not "you were charged".
+
 ## 0.7.5 — 2026-07-16
 
 Documentation only — runtime code is byte-identical to 0.7.3 and 0.7.4.
