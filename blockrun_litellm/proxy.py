@@ -707,6 +707,7 @@ def _settlement_status(
     *,
     parse_failed_after_settlement: bool = False,
     reached_gateway: bool = True,
+    is_solana: Optional[bool] = None,
 ) -> Optional[str]:
     """Was this failure free, or might it have cost money? Returns None or "unknown".
 
@@ -719,7 +720,14 @@ def _settlement_status(
 
     * **Base media routes** settle only after a successful upstream call
       (verified: images/generations:333, audio/generations:423, audio/speech:292,
-      image2image:389), so a failure settles nothing.
+      image2image:389), so a failure settles nothing. Same for non-streaming
+      chat. Base *streaming* chat is the exception — it settles inside
+      ``metadata.then(...)``, which resolves even when the stream loop's catch
+      fires, so a stream that opens and then dies IS charged. That can't reach
+      this function: a mid-stream death never produces a >=400 row (the 200 was
+      logged when the headers arrived), and a >=400 at header time means the
+      stream never ran. Noted so the "Base failures are free" line isn't later
+      read as license it doesn't grant.
     * **Solana** settles *optimistically* on chat, search, both image routes and
       music: settle fires in parallel with the upstream work, so a call that
       verifies and then fails **is charged** — and the error response carries no
@@ -748,6 +756,13 @@ def _settlement_status(
     Everything else that failed left this process, and on Solana that is enough
     to be unsure.
 
+    ``is_solana`` should be the chain the call actually ran on, snapshotted when
+    it started. Resolving it here would re-read ``BLOCKRUN_API_URL`` — a mutable
+    global — minutes later on a long media call, and if it changed in flight a
+    Solana charge would be classified as Base and written off as free. Defaults
+    to resolving now for callers whose request is short enough that it cannot
+    drift.
+
     Deliberately one bit of chain rather than a per-route table of which Solana
     endpoints settle optimistically — that table lives in the gateway and would
     drift here. The asymmetry decides it: a false "unknown" costs a glance at the
@@ -767,7 +782,7 @@ def _settlement_status(
         return "unknown"  # settle already ran; only the parse failed
     if not reached_gateway:
         return None  # SDK refused it locally — nothing was ever sent to pay for
-    if _adapter._is_solana_url(None):
+    if _adapter._is_solana_url(None) if is_solana is None else is_solana:
         return "unknown"  # optimistic settle: ANY failure here may be charged
     if http_status == 504:
         return "unknown"  # our await ceiling; the worker may still settle
@@ -811,6 +826,10 @@ async def _media_endpoint(
     result: Optional[Dict[str, Any]] = None
     parse_failed_after_settlement = False
     reached_gateway = True
+    # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
+    # global and these calls run for minutes. If it flipped mid-flight we would
+    # classify a Solana charge as Base and write it off as free.
+    is_solana = _adapter._is_solana_url(None)
     async with _get_media_semaphore():
         try:
             result = await call()
@@ -870,6 +889,7 @@ async def _media_endpoint(
             settlement,
             parse_failed_after_settlement=parse_failed_after_settlement,
             reached_gateway=reached_gateway,
+            is_solana=is_solana,
         ),
     )
     headers = _cost_response_headers(None, settlement)
@@ -1315,6 +1335,10 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
     result: Optional[Dict[str, Any]] = None
     parse_failed_after_settlement = False
     reached_gateway = True
+    # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
+    # global and these calls run for minutes. If it flipped mid-flight we would
+    # classify a Solana charge as Base and write it off as free.
+    is_solana = _adapter._is_solana_url(None)
     async with _get_media_semaphore():
         job["status"] = "in_progress"
         try:
@@ -1368,6 +1392,7 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
             settlement,
             parse_failed_after_settlement=parse_failed_after_settlement,
             reached_gateway=reached_gateway,
+            is_solana=is_solana,
         ),
     )
 
