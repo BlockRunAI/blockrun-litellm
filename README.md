@@ -361,6 +361,8 @@ curl http://localhost:4001/v1/chat/completions \
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
+| `POST` | `/v1beta/models/{model}:generateContent` | Native Gemini JSON request and response, with automatic x402 payment. |
+| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Native Gemini SSE, with automatic x402 payment. |
 | `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
 | `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`, and `quality` (Solana only — see below). |
 | `POST` | `/v1/images/edits` | OpenAI-compatible image editing. Accepts JSON data URIs or multipart `image`/`image[]`; supports multiple source images, `mask`, and `quality` (Solana only). `/v1/images/image2image` is an alias. |
@@ -374,6 +376,59 @@ curl http://localhost:4001/v1/chat/completions \
 | `GET`  | `/v1/models` | BlockRun model catalog |
 | `GET`  | `/healthz` | Liveness probe (no upstream call) |
 | `GET`  | `/docs` | Auto-generated Swagger UI |
+
+### 2e. Native Gemini protocol
+
+Native Gemini calls use the sidecar root (`http://localhost:4001`), not the
+OpenAI `/v1` base. The sidecar preserves Gemini request/response JSON and SSE
+frames and adds the x402 payment signature using the configured wallet.
+
+```bash
+# Non-streaming
+curl http://localhost:4001/v1beta/models/gemini-2.5-flash:generateContent \
+  -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Reply with native-ok"}]}]}'
+
+# Streaming
+curl -N 'http://localhost:4001/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse' \
+  -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Reply with stream-ok"}]}]}'
+```
+
+The official Google Gen AI Python SDK can use the same native protocol. Keep
+the SDK itself; point its custom base URL at the sidecar and use any non-empty
+placeholder API key (the sidecar removes it before forwarding):
+
+```python
+from google import genai
+from google.genai import types
+
+client = genai.Client(
+    api_key="unused",
+    http_options=types.HttpOptions(base_url="http://localhost:4001"),
+)
+
+response = client.models.generate_content(
+    model="gemini-2.5-flash-lite",
+    contents="Reply with native-ok",
+)
+print(response.text)
+
+for chunk in client.models.generate_content_stream(
+    model="gemini-2.5-flash-lite",
+    contents="Reply with stream-ok",
+):
+    print(chunk.text or "", end="")
+```
+
+For Solana, start the sidecar with
+`BLOCKRUN_API_URL=https://sol.blockrun.ai/api` and a `SOLANA_WALLET_KEY` (or
+the wallet already stored at `~/.blockrun/.solana-session`). A client-supplied
+Google API key is ignored; the local wallet is the authentication and payment
+mechanism.
+
+This is a sidecar HTTP feature. `litellm.completion(...)` remains the
+OpenAI-compatible interface and continues to use `/v1/chat/completions`.
 
 #### Image request limits
 
@@ -403,7 +458,7 @@ otherwise degrades silently to text-to-video and still bills you.
 Reference-to-video (`reference_videos`/`reference_audios`) is **not** supported:
 both gateways currently gate it off and would return 503.
 
-### 2e. Image generation
+### 2f. Image generation
 
 ```python
 from openai import OpenAI

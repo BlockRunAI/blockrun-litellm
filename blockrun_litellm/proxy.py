@@ -11,6 +11,8 @@ Endpoints
 - ``POST /v1/messages``              — native Anthropic Messages (Claude Code,
   Anthropic SDK); verbatim x402-signed passthrough — tools/thinking preserved
 - ``POST /v1/messages/count_tokens`` — Anthropic token counting (passthrough)
+- ``POST /v1beta/models/{model}:generateContent`` — native Gemini JSON
+- ``POST /v1beta/models/{model}:streamGenerateContent`` — native Gemini SSE
 - ``POST /v1/images/generations``    — OpenAI Image Generations (DALL-E compatible)
 - ``POST /v1/videos/generations``    — video generation (xai/grok-imagine-video,
   Seedance); async submit+poll, settles only on completion
@@ -386,6 +388,17 @@ def _openai_fwd_headers(request: Request) -> Dict[str, str]:
     return {"content-type": request.headers.get("content-type", "application/json")}
 
 
+def _gemini_fwd_headers(request: Request) -> Dict[str, str]:
+    """Headers for native Gemini requests.
+
+    Google SDKs require an ``api_key`` even when pointed at a custom base URL
+    and may send it as ``x-goog-api-key`` or ``?key=...``.  The sidecar uses
+    the local x402 wallet instead, so neither credential is forwarded.  Keep
+    only the content type; the BlockRun gateway supplies its own Google key.
+    """
+    return {"content-type": request.headers.get("content-type", "application/json")}
+
+
 def _open_upstream_stream(
     client: httpx.Client, target: str, raw: bytes, headers: Dict[str, str]
 ) -> httpx.Response:
@@ -511,7 +524,14 @@ def _body_model(raw: bytes) -> Optional[str]:
 
 
 async def _forward_passthrough(
-    request: Request, path: str, headers: Dict[str, str], *, allow_stream: bool
+    request: Request,
+    path: str,
+    headers: Dict[str, str],
+    *,
+    allow_stream: bool,
+    stream_override: Optional[bool] = None,
+    model_override: Optional[str] = None,
+    forward_query: bool = True,
 ) -> Response:
     """Verbatim x402-signed passthrough to a BlockRun native endpoint.
 
@@ -528,18 +548,18 @@ async def _forward_passthrough(
     api_url = _resolve_api_url()
     raw = await request.body()
     client = _messages_client(api_url)
-    qs = request.url.query
+    qs = request.url.query if forward_query else ""
     target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
 
     _t0 = time.monotonic()
-    model = _body_model(raw)
+    model = model_override or _body_model(raw)
     req_id = request.headers.get("x-request-id")
 
     def _latency_ms() -> float:
         return (time.monotonic() - _t0) * 1000.0
 
-    wants_stream = False
-    if allow_stream:
+    wants_stream = bool(stream_override) if stream_override is not None else False
+    if allow_stream and stream_override is None:
         try:
             wants_stream = bool(_json.loads(raw or b"{}").get("stream"))
         except Exception:
@@ -662,6 +682,49 @@ async def _forward_passthrough(
         status_code=status,
         media_type=ctype,
         headers=_cost_response_headers(cost, settlement),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Native Gemini /v1beta passthrough (Google GenAI SDK, raw REST clients, ...)
+# ---------------------------------------------------------------------------
+# Gemini selects streaming in the URL method, not with a JSON ``stream`` field.
+# The request and response bodies stay byte-for-byte native; only x402 payment
+# signing is added by the shared transport.  A Google SDK's dummy ``key`` query
+# and x-goog-api-key header are deliberately dropped before the gateway hop.
+
+_GEMINI_METHODS = {"generateContent", "streamGenerateContent"}
+
+
+def _gemini_error(status: int, message: str, code: str = "INVALID_ARGUMENT") -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"code": status, "message": message, "status": code}},
+    )
+
+
+@app.post("/v1beta/models/{model_and_method:path}", dependencies=[Depends(_require_token)])
+async def gemini_native(request: Request, model_and_method: str) -> Any:
+    raw_model, separator, method = model_and_method.rpartition(":")
+    if not separator or not raw_model.strip() or method not in _GEMINI_METHODS:
+        return _gemini_error(
+            400,
+            "This endpoint only supports generateContent and streamGenerateContent.",
+        )
+
+    model = raw_model.strip().removeprefix("google/")
+    return await _forward_passthrough(
+        request,
+        f"/v1beta/models/{model_and_method}",
+        _gemini_fwd_headers(request),
+        allow_stream=True,
+        stream_override=method == "streamGenerateContent",
+        model_override=f"google/{model}",
+        # Google SDKs append ?key=... and ?alt=sse.  The method already tells
+        # the gateway whether to stream, so forwarding either is unnecessary;
+        # dropping the query also prevents a real Google key from reaching
+        # gateway access logs when a caller accidentally configured one.
+        forward_query=False,
     )
 
 
