@@ -20,6 +20,20 @@
   removes both because BlockRun authenticates with the local x402 wallet and
   the gateway owns the upstream Google credential.
 
+- The model segment is sanitized before forwarding: `models/`/`google/`
+  prefixes are stripped and the path is rebuilt from the clean id, so a crafted
+  model name cannot move the signed upstream target outside `/v1beta/models/`.
+  Unsupported methods and invalid model ids are rejected with a `400` — and, per
+  the 0.7.6 every-exit-logs guarantee, still write an audit row.
+
+### Availability
+
+- Native Gemini passthrough is **enterprise/allowlist-only on the Base gateway**
+  (non-allowlisted payers receive `403 PERMISSION_DENIED` and are not charged);
+  it is generally available on Solana (`sol.blockrun.ai`). Retail callers on
+  Base should use `/v1/chat/completions` with `model="google/gemini-3.1-pro"`.
+  Only `generateContent`/`streamGenerateContent` are proxied.
+
 ### Compatibility
 
 - Existing OpenAI, Anthropic, image, video, and audio routes are unchanged.

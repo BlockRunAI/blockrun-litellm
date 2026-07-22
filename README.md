@@ -427,6 +427,22 @@ the wallet already stored at `~/.blockrun/.solana-session`). A client-supplied
 Google API key is ignored; the local wallet is the authentication and payment
 mechanism.
 
+**Availability.** Native Gemini passthrough on the **Base** gateway (the
+default, `https://blockrun.ai/api`) is limited to enterprise/allowlisted
+wallets — other payers get `403 PERMISSION_DENIED` and are **not** charged. On
+**Solana** (`https://sol.blockrun.ai/api`) it is generally available. If your
+wallet is not on the Base allowlist, use Solana for native Gemini, or call the
+OpenAI-format `/v1/chat/completions` route with `model="google/gemini-3.1-pro"`,
+which works on both chains. Only `generateContent` and `streamGenerateContent`
+are proxied; `countTokens`, model list/get, and `embedContent` are not served by
+the gateway. Streaming always returns SSE regardless of `alt=` (the client query
+string is dropped and the gateway sets `alt=sse` itself), so raw REST clients
+must parse SSE, not the chunked-JSON-array form.
+
+If you set `BLOCKRUN_PROXY_TOKEN` to guard the sidecar, the Google SDK cannot
+send it (it only sends `x-goog-api-key`), so pass it explicitly as a Bearer
+header: `types.HttpOptions(base_url=..., headers={"Authorization": "Bearer <token>"})`.
+
 This is a sidecar HTTP feature. `litellm.completion(...)` remains the
 OpenAI-compatible interface and continues to use `/v1/chat/completions`.
 
