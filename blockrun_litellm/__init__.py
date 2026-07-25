@@ -24,6 +24,14 @@ The adapter delegates x402 wallet signing and payment to the
 
 from blockrun_litellm.logger import enable_local_logging
 from blockrun_litellm.provider import BlockRunLLM, register
+from blockrun_litellm.catalog import BLOCKRUN_MODEL_IDS, is_known_model, model_ids
 
-__all__ = ["BlockRunLLM", "register", "enable_local_logging"]
+__all__ = [
+    "BLOCKRUN_MODEL_IDS",
+    "BlockRunLLM",
+    "enable_local_logging",
+    "is_known_model",
+    "model_ids",
+    "register",
+]
 __version__ = "0.7.6"
