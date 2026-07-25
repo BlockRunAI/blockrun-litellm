@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.8.0 — 2026-07-22
+
+### Added
+
+- **Gemini's native `v1beta` protocol now works through the local sidecar.**
+  `POST /v1beta/models/{model}:generateContent` and
+  `POST /v1beta/models/{model}:streamGenerateContent` are forwarded verbatim
+  to BlockRun while the sidecar handles Base or Solana x402 payment locally.
+  This lets a customer keep Gemini-native request/response bodies and SSE
+  frames instead of translating through OpenAI Chat Completions.
+
+- Streaming is selected from the Gemini URL method, matching Google's wire
+  protocol (there is no OpenAI-style `"stream": true` field to inspect).
+  Upstream errors keep their native HTTP status and Gemini error envelope.
+
+- Client Google credentials are never forwarded. Google SDKs may require a
+  dummy API key and attach it as `x-goog-api-key` or `?key=...`; the sidecar
+  removes both because BlockRun authenticates with the local x402 wallet and
+  the gateway owns the upstream Google credential.
+
+- The model segment is sanitized before forwarding: `models/`/`google/`
+  prefixes are stripped and the path is rebuilt from the clean id, so a crafted
+  model name cannot move the signed upstream target outside `/v1beta/models/`.
+  Unsupported methods and invalid model ids are rejected with a `400` — and, per
+  the 0.7.6 every-exit-logs guarantee, still write an audit row.
+
+### Availability
+
+- Native Gemini passthrough is **enterprise/allowlist-only on the Base gateway**
+  (non-allowlisted payers receive `403 PERMISSION_DENIED` and are not charged);
+  it is generally available on Solana (`sol.blockrun.ai`). Retail callers on
+  Base should use `/v1/chat/completions` with `model="google/gemini-3.1-pro"`.
+  Only `generateContent`/`streamGenerateContent` are proxied.
+
+### Compatibility
+
+- Existing OpenAI, Anthropic, image, video, and audio routes are unchanged.
+- Native Gemini is available in sidecar/proxy mode. The in-process LiteLLM
+  custom provider remains OpenAI-shaped because it returns LiteLLM response
+  objects rather than exposing an HTTP protocol surface.
+
 ## 0.7.6 — 2026-07-16
 
 ### Fixed
