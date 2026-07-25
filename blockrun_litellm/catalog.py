@@ -3,7 +3,8 @@
 The gateway is the source of truth and accepts new model IDs without a package
 upgrade. This module is deliberately a static, dependency-free snapshot for
 callers that need to render an allowlist or model picker before starting a
-proxy. Call ``GET https://blockrun.ai/api/v1/models`` for live metadata.
+proxy. Call ``GET https://blockrun.ai/api/v1/models`` for live metadata;
+``CATALOG_SNAPSHOT_DATE`` tells a caller how old this copy is.
 """
 
 from __future__ import annotations
@@ -11,8 +12,10 @@ from __future__ import annotations
 from typing import Tuple
 
 
-# Snapshot from https://blockrun.ai/api/v1/models on 2026-07-25. Keep this in
-# sync with blockrun-llm-go-vip/models.go when publishing model additions.
+# Snapshot taken from https://blockrun.ai/api/v1/models on the date below, in
+# the gateway's own catalog order. Refresh both together.
+CATALOG_SNAPSHOT_DATE = "2026-07-24"
+
 BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-terra",
