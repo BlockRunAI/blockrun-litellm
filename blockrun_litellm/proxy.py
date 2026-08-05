@@ -1762,6 +1762,16 @@ def _chat_payload_to_response(payload: Dict[str, Any], model: str) -> Dict[str, 
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
+            **(
+                {"input_tokens_details": usage["prompt_tokens_details"]}
+                if usage.get("prompt_tokens_details") is not None
+                else {}
+            ),
+            **(
+                {"output_tokens_details": usage["completion_tokens_details"]}
+                if usage.get("completion_tokens_details") is not None
+                else {}
+            ),
         },
     }
 
@@ -1824,7 +1834,7 @@ async def _responses_sse_stream(
     seq += 1
 
     parts: List[str] = []
-    usage_out = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    usage_out: Dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     async with _get_semaphore():
         try:
@@ -1853,6 +1863,16 @@ async def _responses_sse_stream(
                         "input_tokens": u.get("prompt_tokens", 0),
                         "output_tokens": u.get("completion_tokens", 0),
                         "total_tokens": u.get("total_tokens", 0),
+                        **(
+                            {"input_tokens_details": u["prompt_tokens_details"]}
+                            if u.get("prompt_tokens_details") is not None
+                            else {}
+                        ),
+                        **(
+                            {"output_tokens_details": u["completion_tokens_details"]}
+                            if u.get("completion_tokens_details") is not None
+                            else {}
+                        ),
                     }
         except PaymentError as exc:
             yield _responses_event(

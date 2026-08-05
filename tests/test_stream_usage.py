@@ -40,7 +40,13 @@ from blockrun_llm.types import (
 from blockrun_litellm.provider import _to_generic_chunk, register
 
 
-GATEWAY_USAGE = ChatUsage(prompt_tokens=100, completion_tokens=20, total_tokens=120)
+GATEWAY_USAGE = ChatUsage(
+    prompt_tokens=100,
+    completion_tokens=20,
+    total_tokens=120,
+    cache_read_input_tokens=40,
+    completion_tokens_details={"reasoning_tokens": 12},
+)
 
 
 def _chunk(
@@ -71,6 +77,8 @@ def test_usage_frame_forwards_token_counts() -> None:
         "prompt_tokens": 100,
         "completion_tokens": 20,
         "total_tokens": 120,
+        "completion_tokens_details": {"reasoning_tokens": 12},
+        "cache_read_input_tokens": 40,
     }
     # The frame must not terminate or mutate the stream state.
     assert gchunk["text"] == ""
@@ -151,6 +159,9 @@ def test_usage_survives_custom_stream_wrapper() -> None:
     assert built.usage.prompt_tokens == 100
     assert built.usage.completion_tokens == 20
     assert built.usage.total_tokens == 120
+    dumped_usage = built.usage.model_dump()
+    assert dumped_usage["completion_tokens_details"]["reasoning_tokens"] == 12
+    assert dumped_usage["cache_read_input_tokens"] == 40
 
 
 def test_usage_dropped_without_provider_specific_fields_key() -> None:

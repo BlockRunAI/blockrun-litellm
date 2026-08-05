@@ -249,9 +249,17 @@ def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
     # leaking a stray ``cost_usd`` field into ``provider_specific_fields``.
     extras.pop("cost_usd", None)
     if chunk.usage is not None:
-        usage_extra = chunk.usage.model_extra or {}
-        if usage_extra:
-            extras.setdefault("usage_details", {}).update(usage_extra)
+        usage_details: Dict[str, Any] = dict(chunk.usage.model_extra or {})
+        if chunk.usage.prompt_tokens_details is not None:
+            usage_details["prompt_tokens_details"] = chunk.usage.prompt_tokens_details
+        if chunk.usage.completion_tokens_details is not None:
+            usage_details["completion_tokens_details"] = chunk.usage.completion_tokens_details
+        if chunk.usage.cache_read_input_tokens is not None:
+            usage_details["cache_read_input_tokens"] = chunk.usage.cache_read_input_tokens
+        if chunk.usage.cache_creation_input_tokens is not None:
+            usage_details["cache_creation_input_tokens"] = chunk.usage.cache_creation_input_tokens
+        if usage_details:
+            extras.setdefault("usage_details", {}).update(usage_details)
     return extras
 
 
@@ -282,6 +290,14 @@ def _to_generic_chunk(chunk: ChatCompletionChunk) -> GenericStreamingChunk:
                 "completion_tokens": chunk.usage.completion_tokens,
                 "total_tokens": chunk.usage.total_tokens,
             }
+            if chunk.usage.prompt_tokens_details is not None:
+                usage["prompt_tokens_details"] = chunk.usage.prompt_tokens_details
+            if chunk.usage.completion_tokens_details is not None:
+                usage["completion_tokens_details"] = chunk.usage.completion_tokens_details
+            if chunk.usage.cache_read_input_tokens is not None:
+                usage["cache_read_input_tokens"] = chunk.usage.cache_read_input_tokens
+            if chunk.usage.cache_creation_input_tokens is not None:
+                usage["cache_creation_input_tokens"] = chunk.usage.cache_creation_input_tokens
         # NOTE: deliberately do NOT set tool_use here. This is the post-finish
         # usage frame; adding the key changes LiteLLM's CustomStreamWrapper
         # post-finish guard and lets the frame survive even without
