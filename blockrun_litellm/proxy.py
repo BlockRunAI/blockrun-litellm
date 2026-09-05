@@ -555,6 +555,24 @@ def _cost_response_headers(
     return out
 
 
+def _retry_after(source: Any) -> Dict[str, str]:
+    """Carry an upstream ``Retry-After`` through, when there is one.
+
+    Every stock OpenAI and Anthropic client schedules its own backoff off this
+    header. Dropping it on the way through turns a client that would have
+    waited into one that spins against a rate limit — so a 429 that arrives
+    with a wait time must leave with it.
+    """
+    value = None
+    if source is not None:
+        try:
+            value = source.get("retry-after") if hasattr(source, "get") else None
+        except Exception:  # noqa: BLE001 - an unreadable header bag is not fatal
+            value = None
+    value = value or getattr(source, "retry_after", None)
+    return {"retry-after": str(value)} if value else {}
+
+
 def _body_model(raw: bytes) -> Optional[str]:
     try:
         return _json.loads(raw or b"{}").get("model")
@@ -741,11 +759,12 @@ async def _forward_passthrough(
             resp.content,
             cost,
             settlement,
+            _retry_after(resp.headers),
         )
 
     async with _get_semaphore():
         try:
-            status, ctype, content, cost, settlement = await run_in_threadpool(_post)
+            status, ctype, content, cost, settlement, retry = await run_in_threadpool(_post)
         except Exception as exc:  # noqa: BLE001
             if _is_solana_rpc_exc(exc):
                 log.warning("solana rpc error during payment signing: %s", _solana_rpc_msg(exc))
@@ -769,7 +788,7 @@ async def _forward_passthrough(
         content=content,
         status_code=status,
         media_type=ctype,
-        headers=_cost_response_headers(cost, settlement),
+        headers={**_cost_response_headers(cost, settlement), **retry},
     )
 
 
@@ -1014,6 +1033,7 @@ async def _media_endpoint(
     result: Optional[Dict[str, Any]] = None
     parse_failed_after_settlement = False
     reached_gateway = True
+    retry_headers: Dict[str, str] = {}
     # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
     # global and these calls run for minutes. If it flipped mid-flight we would
     # classify a Solana charge as Base and write it off as free.
@@ -1054,6 +1074,7 @@ async def _media_endpoint(
         except APIError as exc:
             status = exc.status_code if 400 <= getattr(exc, "status_code", 0) < 600 else 502
             payload = {"error": str(exc)}
+            retry_headers = _retry_after(exc)
         except Exception as exc:  # noqa: BLE001 - a missing row is worse than a broad catch
             # Transport errors (httpx.ReadTimeout on a 10-minute image call,
             # connection resets) escape the SDK unwrapped. If one lands after the
@@ -1086,6 +1107,7 @@ async def _media_endpoint(
         ),
     )
     headers = _cost_response_headers(None, settlement)
+    headers.update(retry_headers)
     if warning:
         headers[_WARNING_HEADER] = warning
     return JSONResponse(status_code=status, content=payload, headers=headers)

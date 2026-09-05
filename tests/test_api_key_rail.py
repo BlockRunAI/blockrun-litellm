@@ -127,6 +127,36 @@ class TestResolution:
         monkeypatch.setenv("BLOCKRUN_API_KEY", KEY)
         assert _apikey.resolve_api_key("0xdeadbeef") == KEY
 
+    @pytest.mark.parametrize("bad", ["brk_", "brk_live_ abc", "brk_live_\tx"])
+    def test_a_mangled_key_is_an_error_not_a_fallback(self, monkeypatch, bad):
+        """Falling through to the wallet rail on a typo is the wrong failure.
+
+        The caller asked for the account rail. Quietly using a wallet instead
+        either 402s for one they do not have or spends from one they did not
+        mean to touch — both worse than being told the key is malformed.
+        """
+        monkeypatch.setenv("BLOCKRUN_API_KEY", bad)
+        with pytest.raises(ValueError, match="BlockRun key|usable"):
+            _apikey.resolve_api_key()
+
+    def test_a_non_brk_env_value_is_an_error(self, monkeypatch):
+        # Someone pasting a wallet key into BLOCKRUN_API_KEY must hear about it,
+        # not have it silently ignored while the rail they asked for is skipped.
+        monkeypatch.setenv("BLOCKRUN_API_KEY", "0xdeadbeef")
+        with pytest.raises(ValueError, match="does not start with"):
+            _apikey.resolve_api_key()
+
+    def test_both_credentials_at_once_is_refused(self, monkeypatch):
+        """No reading of that call is obviously right, and they spend different
+        money — so it is refused rather than ranked."""
+        with pytest.raises(ValueError, match="not both"):
+            _adapter.chat_completion_sync(
+                "openai/gpt-5.5",
+                [{"role": "user", "content": "hi"}],
+                api_key=KEY,
+                private_key="0xdeadbeef",
+            )
+
     def test_no_credentials_means_the_wallet_rail(self):
         assert _apikey.resolve_api_key() is None
 
@@ -584,3 +614,72 @@ class TestAuditLog:
             {"cost_usd": None, "settlement": None, "rail": "api_key"}, 0.0009
         )
         assert fields == {"cost_usd": 0.0009, "cost_source": "blockrun_account"}
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+
+class TestRetryAfter:
+    """A 429's wait time has to survive the hop, or clients spin instead of wait."""
+
+    def test_the_header_rides_on_the_exception(self, monkeypatch, transport):
+        monkeypatch.setenv("BLOCKRUN_API_KEY", KEY)
+        transport(
+            json_responder(
+                {"error": {"message": "Rate limit exceeded", "code": "rate_limit_exceeded"}},
+                status=429,
+                headers={"retry-after": "7"},
+            )
+        )
+        with pytest.raises(APIError) as excinfo:
+            _adapter.chat_completion_sync("openai/gpt-5.5", [{"role": "user", "content": "hi"}])
+        assert excinfo.value.status_code == 429
+        assert excinfo.value.retry_after == "7"
+
+    def test_the_proxy_puts_it_back_on_the_wire(self, proxy_client, transport):
+        transport(
+            json_responder(
+                {"error": {"message": "Rate limit exceeded"}},
+                status=429,
+                headers={"retry-after": "7"},
+            )
+        )
+        response = proxy_client.post(
+            "/v1/chat/completions",
+            json={"model": "openai/gpt-5.5", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "7"
+
+    def test_media_routes_surface_it_too(self, proxy_client, transport):
+        transport(
+            json_responder(
+                {"error": {"message": "Rate limit exceeded"}},
+                status=429,
+                headers={"retry-after": "3"},
+            )
+        )
+        response = proxy_client.post(
+            "/v1/images/generations", json={"prompt": "a cat", "model": "google/nano-banana"}
+        )
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "3"
+
+    def test_a_429_without_the_header_is_still_a_429(self, monkeypatch, transport):
+        monkeypatch.setenv("BLOCKRUN_API_KEY", KEY)
+        transport(json_responder({"error": {"message": "slow down"}}, status=429))
+        with pytest.raises(APIError) as excinfo:
+            _adapter.chat_completion_sync("openai/gpt-5.5", [{"role": "user", "content": "hi"}])
+        assert excinfo.value.status_code == 429
+        assert getattr(excinfo.value, "retry_after", None) is None
+
+
+class TestCacheKeys:
+    def test_a_wallet_key_is_not_stored_in_a_cache_key(self):
+        """These strings are dict keys — they land in reprs and tracebacks."""
+        secret = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+        key = _adapter._client_key("https://blockrun.ai/api", secret)
+        assert secret not in key
+        assert key != _adapter._client_key("https://blockrun.ai/api", secret + "0")

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
 import os
 import threading
@@ -115,6 +116,55 @@ _BASE_KEY_ENVS = ("BLOCKRUN_WALLET_KEY", "BASE_CHAIN_WALLET_KEY")
 # Written by the SDK's interactive wallet setup; the same files it auto-loads.
 _SOLANA_SESSION = Path.home() / ".blockrun" / ".solana-session"
 _BASE_SESSION = Path.home() / ".blockrun" / ".session"
+# Where the BlockRun CLI/SDK records a chain the user picked interactively.
+# Honouring it is not a nicety: someone who ran the setup flow and chose Base
+# has already answered this question, and a default that ignores their answer
+# is a worse failure than the one the default exists to prevent.
+#
+# Order matters, and not hypothetically — both files exist on a real machine
+# here and DISAGREE (``payment-chain`` says solana, the older ``.chain`` says
+# base). ``payment-chain`` is the current name and wins; ``.chain`` is the
+# legacy spelling, read only so an older install still gets an answer.
+_CHAIN_FILES = (
+    Path.home() / ".blockrun" / "payment-chain",
+    Path.home() / ".blockrun" / ".chain",
+)
+
+
+def _chain_from_file() -> Optional[str]:
+    """The chain the CLI last wrote, if any. Unreadable or empty means absent."""
+    for path in _CHAIN_FILES:
+        try:
+            if path.is_file():
+                value = path.read_text().strip().lower()
+                if value in _CHAIN_ALIASES:
+                    return value
+                if value:
+                    _log.warning("%s contains %r, which is not a known chain", path, value)
+        except OSError:
+            continue
+    return None
+
+
+def _chain_from_key(private_key: Optional[str]) -> Optional[str]:
+    """Infer the chain from an explicitly passed wallet key's shape.
+
+    A Base key is 32 hex bytes, with or without the ``0x``; a Solana key is
+    base58 and neither. When a caller hands us a specific key, its own format
+    is a better answer than anything on disk — the key on the call is the
+    wallet that will pay, and routing it to the other chain's signer fails.
+    """
+    if not private_key:
+        return None
+    candidate = private_key.strip()
+    body = candidate[2:] if candidate.lower().startswith("0x") else candidate
+    if len(body) == 64:
+        try:
+            int(body, 16)
+        except ValueError:
+            return "solana"
+        return "base"
+    return "solana" if candidate else None
 
 
 def _has_wallet(envs: Any, session: Path) -> bool:
@@ -132,8 +182,12 @@ def _has_wallet(envs: Any, session: Path) -> bool:
 _default_url_cache: Dict[Any, str] = {}
 
 
-def _default_wallet_api_url() -> str:
-    """Gateway URL when nothing explicit says which chain to use."""
+def _default_wallet_api_url(private_key: Optional[str] = None) -> str:
+    """Gateway URL when nothing explicit says which chain to use.
+
+    Precedence below the env/URL settings: an explicitly passed key's own shape,
+    then the chain the CLI recorded, then what wallets exist on the host.
+    """
     chain = (os.environ.get("BLOCKRUN_CHAIN") or "").strip().lower()
     if chain:
         resolved = _CHAIN_ALIASES.get(chain)
@@ -145,6 +199,12 @@ def _default_wallet_api_url() -> str:
             chain,
             ", ".join(sorted(_CHAIN_ALIASES)),
         )
+    from_key = _chain_from_key(private_key)
+    if from_key:
+        return _CHAIN_ALIASES[from_key]
+    from_file = _chain_from_file()
+    if from_file:
+        return _CHAIN_ALIASES[from_file]
     cache_key = tuple(os.environ.get(name, "") for name in _SOLANA_KEY_ENVS + _BASE_KEY_ENVS)
     cached = _default_url_cache.get(cache_key)
     if cached is not None:
@@ -165,7 +225,9 @@ def _default_wallet_api_url() -> str:
     return resolved
 
 
-def resolve_api_url(api_url: Optional[str] = None) -> str:
+def resolve_api_url(
+    api_url: Optional[str] = None, private_key: Optional[str] = None
+) -> str:
     """The gateway URL a wallet-rail call will actually use.
 
     Precedence: explicit argument, then ``BLOCKRUN_API_URL``, then the chain
@@ -173,14 +235,18 @@ def resolve_api_url(api_url: Optional[str] = None) -> str:
     client rather than relying on the SDK's own (Base) default, which no longer
     matches ours.
     """
-    return api_url or os.environ.get("BLOCKRUN_API_URL") or _default_wallet_api_url()
+    return (
+        api_url
+        or os.environ.get("BLOCKRUN_API_URL")
+        or _default_wallet_api_url(private_key)
+    )
 
 
 def _reset_chain_cache_for_tests() -> None:
     _default_url_cache.clear()
 
 
-def _is_solana_url(api_url: Optional[str]) -> bool:
+def _is_solana_url(api_url: Optional[str], private_key: Optional[str] = None) -> bool:
     """Sniff whether the effective gateway URL points at Solana.
 
     Falls back to ``BLOCKRUN_API_URL`` and then the chain default when no
@@ -190,7 +256,7 @@ def _is_solana_url(api_url: Optional[str]) -> bool:
     async client and crash inside the EVM payment encoder
     (``eth_abi.AddressEncoder`` rejects base58 mint addresses).
     """
-    return "sol.blockrun.ai" in resolve_api_url(api_url)
+    return "sol.blockrun.ai" in resolve_api_url(api_url, private_key)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +272,18 @@ def _route_key(api_key: Optional[str], private_key: Optional[str]) -> Optional[s
     ``litellm.completion(..., api_key="brk_live_...")`` picks the account rail
     without the caller needing a second parameter name. A hex or base58 wallet
     key cannot be mistaken for one — see :func:`_apikey.looks_like_api_key`.
+
+    Passing BOTH an account key and a wallet key is refused rather than ranked.
+    There is no reading of that call that is obviously right, and the two
+    choices spend different money: guessing would either bill an account the
+    caller meant to leave alone or move USDC out of a wallet they did not
+    intend to touch.
     """
+    if _apikey.looks_like_api_key(api_key) and private_key:
+        raise ValueError(
+            "Pass either api_key (a brk_ account key) or private_key (an x402 "
+            "wallet key), not both — they bill different money."
+        )
     return _apikey.resolve_api_key(api_key, private_key)
 
 
@@ -264,9 +341,17 @@ def _wallet_env_var(api_url: Optional[str]) -> str:
 
 
 def _client_key(api_url: Optional[str], private_key: Optional[str]) -> str:
-    chain = "solana" if _is_solana_url(api_url) else "base"
+    """Cache key for a wallet client, with the key itself hashed.
+
+    The raw private key used to be part of this string, and these keys are dict
+    keys — they surface in a ``repr`` of the cache, in a KeyError, in anything
+    that dumps locals during a crash. Hashing costs nothing here and takes a
+    wallet key out of every one of those paths.
+    """
+    chain = "solana" if _is_solana_url(api_url, private_key) else "base"
     fallback_env = os.environ.get(_wallet_env_var(api_url), "")
-    return f"{chain}::{api_url or ''}::{private_key or fallback_env}"
+    secret = hashlib.sha256((private_key or fallback_env).encode()).hexdigest()
+    return f"{chain}::{api_url or ''}::{secret}"
 
 
 def get_sync_client(

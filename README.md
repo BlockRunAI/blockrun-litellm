@@ -963,6 +963,8 @@ export BLOCKRUN_CHAIN=base
 
 也可以直接用 `BLOCKRUN_API_URL` / `--api-url` / `api_base=` 指到具体网关（优先级高于 `BLOCKRUN_CHAIN`）。
 
+完整优先级（从高到低）：`api_base=` / `--api-url` → `BLOCKRUN_API_URL` → `BLOCKRUN_CHAIN` → 显式传入的钱包私钥自身格式（hex 是 Base，base58 是 Solana）→ BlockRun CLI 记在 `~/.blockrun/payment-chain` 或 `~/.blockrun/.chain` 里的链 → 机器上有哪些钱包 → Solana。
+
 > **从 ≤ 0.9.x 升级、原来用 Base 的？** 不会坏。没有配置链、且机器上只有 Base 钱包时，适配器仍然走 Base，并打一行警告。设 `BLOCKRUN_CHAIN=base` 把选择写死，警告就没了。
 
 ### 配钱包（一次性）
@@ -1110,7 +1112,7 @@ v0.2.0 起完全支持。`stream=True` 时适配层走 `blockrun-llm` 的 `chat_
 不会。钱包那条路一行没动，只有出现 `brk_` 前缀的凭证时才会切到账号路。0.10.0 唯一的行为变化是默认链，见下一条。
 
 **Q：怎么在 Solana 和 Base 之间切？**
-`BLOCKRUN_CHAIN=solana`（0.10.0 起是默认）或 `BLOCKRUN_CHAIN=base`；sidecar 用 `--chain`；也可以直接把 `BLOCKRUN_API_URL` / `api_base=` 指到具体网关（优先级最高）。机器上只有 Base 钱包又什么都没配的，仍然走 Base，并打一行警告。
+`BLOCKRUN_CHAIN=solana`（0.10.0 起是默认）或 `BLOCKRUN_CHAIN=base`；sidecar 用 `--chain`；也可以直接把 `BLOCKRUN_API_URL` / `api_base=` 指到具体网关（优先级最高）。用 CLI 交互式选过链的（`~/.blockrun/.chain`）会被尊重；机器上只有 Base 钱包又什么都没配的，仍然走 Base，并打一行警告。
 
 **Q：私钥放哪？**
 只在本地 —— `SOLANA_WALLET_KEY` / `BLOCKRUN_WALLET_KEY` 环境变量，或 `setup_agent_wallet()` 创建的 `~/.blockrun/.solana-session` / `~/.blockrun/.session`。Provider 和 Proxy 都通过 `blockrun-llm` 读取。链上只看到签名，看不到私钥。用 API Key 时根本不存在私钥。

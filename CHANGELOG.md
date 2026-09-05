@@ -38,6 +38,21 @@
   A reconciliation job can finally tell "no charge exists here" apart from "we
   failed to read the charge".
 
+- **`Retry-After` survives the hop.** A 429 from the account API carries the
+  wait time every stock OpenAI and Anthropic client schedules its backoff
+  from. It now rides on the raised `APIError` and is put back on the sidecar's
+  response, on both the passthrough and media routes. Dropping it turned a
+  client that would have waited into one that spins against a rate limit.
+
+- **A malformed API key is an error, not a silent fallback.** A `brk_` prefix
+  with nothing usable after it, or whitespace inside it, or a `BLOCKRUN_API_KEY`
+  that is plainly a wallet key, now raises. Falling through to the wallet rail
+  was the wrong failure: the caller asked for the account rail, so the next
+  call either 402s for a wallet they do not have or spends from one they did
+  not mean to touch. Passing both an account key and a wallet key at once is
+  refused for the same reason — there is no obviously right reading, and the
+  two spend different money.
+
 - **`--api-key` / `--chain` on the sidecar**, plus `BLOCKRUN_API_KEY`,
   `BLOCKRUN_API_BASE_URL` and `BLOCKRUN_CHAIN`. Startup fails fast on the rail
   it is actually configured for and logs which one it picked — the old check
@@ -58,10 +73,26 @@
   so silently flipping such a host would have turned an upgrade into an outage.
 
   Anything explicit still wins, in this order: an `api_url` / `api_base`
-  argument, then `BLOCKRUN_API_URL`, then `BLOCKRUN_CHAIN`, then the probe
-  above. Note that `BLOCKRUN_CHAIN=solana` on a Base-only host is honoured and
-  fails with "no Solana wallet" — once a choice has been made, quietly serving
-  the other chain would be a lie about which chain moved money.
+  argument, then `BLOCKRUN_API_URL`, then `BLOCKRUN_CHAIN`, then an explicitly
+  passed wallet key's own format, then `~/.blockrun/payment-chain` /
+  `~/.blockrun/.chain`, then the probe above. Note that `BLOCKRUN_CHAIN=solana`
+  on a Base-only host is honoured and fails with "no Solana wallet" — once a
+  choice has been made, quietly serving the other chain would be a lie about
+  which chain moved money.
+
+  Two of those steps exist because the first cut of this change got the default
+  wrong. **The chain the BlockRun CLI recorded is now read**: someone who ran
+  the interactive setup and chose Base had already answered this question, and
+  a "default" that ignored their answer was exactly the breakage the
+  compatibility branch above exists to prevent. And **an explicitly passed
+  wallet key picks its own chain from its format** — a hex key is not base58,
+  so the key on the call is a better answer than anything on disk. Both were
+  caught in review of #32; credit to @KillerQueen-Z.
+
+- **Wallet keys are hashed out of the client-cache keys.** Those strings are
+  dict keys, so they surfaced in a `repr` of the cache, a `KeyError`, and
+  anything that dumps locals during a crash. Hashing costs nothing and takes a
+  private key out of all of those paths.
 
 - `api_key` on a `litellm.completion(...)` call now carries **either**
   credential. The `brk_` prefix selects the account rail; anything else is a

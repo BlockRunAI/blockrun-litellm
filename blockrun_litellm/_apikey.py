@@ -107,6 +107,23 @@ def looks_like_api_key(value: Optional[str]) -> bool:
     return isinstance(value, str) and value.strip().startswith(KEY_PREFIX)
 
 
+def _validated(key: str) -> str:
+    """A key that carries the prefix but nothing usable after it is an error.
+
+    Silently falling through to the wallet rail on a truncated or space-mangled
+    key is the wrong failure: the caller asked for the account rail, the next
+    call would either 402 for a wallet they do not have or, worse, spend from
+    one they did not mean to use. A typo in a credential should say so.
+    """
+    stripped = key.strip()
+    if len(stripped) <= len(KEY_PREFIX) or any(c.isspace() for c in stripped):
+        raise ValueError(
+            f"BLOCKRUN_API_KEY does not look like a usable BlockRun key. "
+            f"Issue one at {PORTAL_URL}/dashboard/keys."
+        )
+    return stripped
+
+
 def resolve_api_key(*candidates: Optional[str]) -> Optional[str]:
     """First BlockRun API key among the candidates, else ``BLOCKRUN_API_KEY``.
 
@@ -116,9 +133,17 @@ def resolve_api_key(*candidates: Optional[str]) -> Optional[str]:
     """
     for candidate in candidates:
         if looks_like_api_key(candidate):
-            return candidate.strip()  # type: ignore[union-attr]
+            return _validated(candidate)  # type: ignore[arg-type]
     env = os.environ.get("BLOCKRUN_API_KEY", "").strip()
-    return env or None
+    if not env:
+        return None
+    if not env.startswith(KEY_PREFIX):
+        raise ValueError(
+            f"BLOCKRUN_API_KEY is set but does not start with {KEY_PREFIX!r}. "
+            f"Unset it to use an x402 wallet, or issue a key at "
+            f"{PORTAL_URL}/dashboard/keys."
+        )
+    return _validated(env)
 
 
 def api_base() -> str:
@@ -225,7 +250,9 @@ def _error_message(status: int, body: bytes) -> str:
     return f"BlockRun API returned HTTP {status}"
 
 
-def raise_for_status(status: int, body: bytes) -> None:
+def raise_for_status(
+    status: int, body: bytes, headers: Optional[Any] = None
+) -> None:
     """Translate an account-API failure into the SDK's exception vocabulary.
 
     The proxy and the provider already branch on ``PaymentError`` vs
@@ -240,6 +267,20 @@ def raise_for_status(status: int, body: bytes) -> None:
     if status < 400:
         return
     message = _error_message(status, body)
+    if status == 429:
+        # The account API answers a rate limit with Retry-After, and every stock
+        # OpenAI/Anthropic client knows how to schedule off that header. Dropping
+        # it turns a client that would have waited into one that spins, so it is
+        # carried on the exception for the proxy to put back on the wire.
+        retry_after = None
+        if headers is not None:
+            try:
+                retry_after = headers.get("retry-after")
+            except Exception:  # noqa: BLE001 - a header bag we cannot read is not fatal
+                retry_after = None
+        error = APIError(message, status)
+        error.retry_after = retry_after  # type: ignore[attr-defined]
+        raise error
     if status == 402:
         raise PaymentError(
             f"{message}. Add credit at {PORTAL_URL}/dashboard/billing.",
@@ -271,7 +312,7 @@ def post_json(
     resp = sync_http().post(
         target_url(path), json=body, headers=headers(api_key), timeout=_timeout(timeout)
     )
-    raise_for_status(resp.status_code, resp.content)
+    raise_for_status(resp.status_code, resp.content, resp.headers)
     return resp.json()
 
 
@@ -286,7 +327,7 @@ async def apost_json(
     resp = await async_http().post(
         target_url(path), json=body, headers=headers(api_key), timeout=_timeout(timeout)
     )
-    raise_for_status(resp.status_code, resp.content)
+    raise_for_status(resp.status_code, resp.content, resp.headers)
     return resp.json()
 
 
@@ -294,7 +335,7 @@ def get_json(path: str, *, api_key: str, timeout: Optional[float] = None) -> Dic
     resp = sync_http().get(
         target_url(path), headers=headers(api_key), timeout=_timeout(timeout)
     )
-    raise_for_status(resp.status_code, resp.content)
+    raise_for_status(resp.status_code, resp.content, resp.headers)
     return resp.json()
 
 
@@ -361,7 +402,7 @@ def stream_chat(
         timeout=_timeout(timeout),
     ) as resp:
         if resp.status_code >= 400:
-            raise_for_status(resp.status_code, resp.read())
+            raise_for_status(resp.status_code, resp.read(), resp.headers)
         for line in resp.iter_lines():
             parsed = _sse_payloads(line)
             if parsed is None:
@@ -388,7 +429,7 @@ async def astream_chat(
         timeout=_timeout(timeout),
     ) as resp:
         if resp.status_code >= 400:
-            raise_for_status(resp.status_code, await resp.aread())
+            raise_for_status(resp.status_code, await resp.aread(), resp.headers)
         async for line in resp.aiter_lines():
             parsed = _sse_payloads(line)
             if parsed is None:
@@ -457,7 +498,7 @@ def submit_and_poll_video(
         # 504 is a transient upstream hiccup on the gateway's own poll; 202 is
         # "still working". Anything else is a real failure and is raised.
         if resp.status_code not in (200, 202, 504):
-            raise_for_status(resp.status_code, resp.content)
+            raise_for_status(resp.status_code, resp.content, resp.headers)
 
     raise APIError(
         f"Video generation did not complete within the {budget_seconds or _DEFAULT_VIDEO_BUDGET_S:.0f}s "
