@@ -1,5 +1,114 @@
 # Changelog
 
+## 0.10.0 — 2026-09-05
+
+### Added
+
+- **API-key rail — BlockRun accounts instead of a wallet.** Set
+  `BLOCKRUN_API_KEY=brk_live_...` (or `--api-key`, or `api_key="brk_live_..."`
+  on a single call) and every surface routes to `api.blockrun.ai` with a Bearer
+  header. No wallet, no private key, no chain, no `[solana]` extra, no USDC.
+  Keys are issued at https://user.blockrun.ai; credit is topped up by card and
+  debited at the published list price.
+
+  This is the wall that stopped most people trying the package. The x402 wallet
+  is the right primitive for an agent — it can hold one, and it needs no
+  account — but a human evaluating the library for an afternoon does not want
+  to fund a Solana wallet first. Both are now first-class, and everything above
+  the credential is byte-identical: same catalogue, same OpenAI and Anthropic
+  wire formats, same streaming, same native fingerprint passthrough.
+
+  Coverage on the new rail: `/v1/chat/completions` (incl. streaming),
+  `/v1/messages`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`,
+  `/v1/videos` + `/v1/videos/generations` (submit, poll and download),
+  `/v1/audio/speech`, `/v1/audio/generations`, `/v1/audio/sound-effects`, and
+  `/v1/models`. The one gap is the **native Gemini protocol**
+  (`/v1beta/models/...`), which `api.blockrun.ai` does not publish: the sidecar
+  answers **501** naming the wallet rail and the `/v1/chat/completions` route to
+  the same models, rather than letting a bare 404 come back from a host that
+  never served it. Gemini models themselves work on both rails.
+
+- **`cost_source: "blockrun_account"` in the audit log.** A call billed to
+  prepaid credit has no per-call on-chain charge, and never will. Tagging those
+  rows `litellm_estimate` would have claimed a real number existed and was
+  missed; the new value says the authoritative figure lives in the account
+  ledger at user.blockrun.ai. `cost_usd` on such a row is LiteLLM's
+  token × list-price estimate (`null` when LiteLLM has no price for the model),
+  which is the same thing it always was — only the label is now honest about it.
+  A reconciliation job can finally tell "no charge exists here" apart from "we
+  failed to read the charge".
+
+- **`Retry-After` survives the hop.** A 429 from the account API carries the
+  wait time every stock OpenAI and Anthropic client schedules its backoff
+  from. It now rides on the raised `APIError` and is put back on the sidecar's
+  response, on both the passthrough and media routes. Dropping it turned a
+  client that would have waited into one that spins against a rate limit.
+
+- **A malformed API key is an error, not a silent fallback.** A `brk_` prefix
+  with nothing usable after it, or whitespace inside it, or a `BLOCKRUN_API_KEY`
+  that is plainly a wallet key, now raises. Falling through to the wallet rail
+  was the wrong failure: the caller asked for the account rail, so the next
+  call either 402s for a wallet they do not have or spends from one they did
+  not mean to touch. Passing both an account key and a wallet key at once is
+  refused for the same reason — there is no obviously right reading, and the
+  two spend different money.
+
+- **`--api-key` / `--chain` on the sidecar**, plus `BLOCKRUN_API_KEY`,
+  `BLOCKRUN_API_BASE_URL` and `BLOCKRUN_CHAIN`. Startup fails fast on the rail
+  it is actually configured for and logs which one it picked — the old check
+  demanded a wallet unconditionally, which an API-key deployment does not have.
+
+### Changed
+
+- **Solana is now the default chain** for the wallet rail. An unconfigured host
+  previously fell through to Base (the SDK's own default). Solana settles in
+  about a second for a fraction of the fee, so it is where a caller who never
+  made a choice should land.
+
+  **This does not break an existing Base deployment.** When nothing explicit is
+  set and the host holds *only* a Base credential — `BLOCKRUN_WALLET_KEY`,
+  `BASE_CHAIN_WALLET_KEY`, or `~/.blockrun/.session` — the adapter keeps using
+  Base and logs a one-line warning telling you to set `BLOCKRUN_CHAIN=base` to
+  make the choice explicit. A hex Base key cannot be parsed by the SVM signer,
+  so silently flipping such a host would have turned an upgrade into an outage.
+
+  Anything explicit still wins, in this order: an `api_url` / `api_base`
+  argument, then `BLOCKRUN_API_URL`, then `BLOCKRUN_CHAIN`, then an explicitly
+  passed wallet key's own format, then `~/.blockrun/payment-chain` /
+  `~/.blockrun/.chain`, then the probe above. Note that `BLOCKRUN_CHAIN=solana`
+  on a Base-only host is honoured and fails with "no Solana wallet" — once a
+  choice has been made, quietly serving the other chain would be a lie about
+  which chain moved money.
+
+  Two of those steps exist because the first cut of this change got the default
+  wrong. **The chain the BlockRun CLI recorded is now read**: someone who ran
+  the interactive setup and chose Base had already answered this question, and
+  a "default" that ignored their answer was exactly the breakage the
+  compatibility branch above exists to prevent. And **an explicitly passed
+  wallet key picks its own chain from its format** — a hex key is not base58,
+  so the key on the call is a better answer than anything on disk. Both were
+  caught in review of #32; credit to @KillerQueen-Z.
+
+- **Wallet keys are hashed out of the client-cache keys.** Those strings are
+  dict keys, so they surfaced in a `repr` of the cache, a `KeyError`, and
+  anything that dumps locals during a crash. Hashing costs nothing and takes a
+  private key out of all of those paths.
+
+- `api_key` on a `litellm.completion(...)` call now carries **either**
+  credential. The `brk_` prefix selects the account rail; anything else is a
+  wallet key, exactly as before. No wallet key format begins with `brk_`, so
+  existing callers are unaffected and no second parameter was needed.
+
+- The sidecar strips the client's `Authorization` header before forwarding on
+  the API-key rail and substitutes its own. `BLOCKRUN_PROXY_TOKEN` is a
+  local guard; forwarding it to a remote host would leak the credential it
+  exists to protect.
+
+- A media failure on the API-key rail is flagged `settlement_status: "unknown"`
+  the way an optimistic-settle chain is. The account is metered from real
+  upstream usage the moment the gateway answers, so a failure on the way back
+  may still have cost money — which is exactly what that flag means.
+
 ## 0.9.1 — 2026-08-07
 
 ### Added

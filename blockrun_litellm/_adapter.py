@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 from blockrun_llm import AsyncLLMClient, ImageClient, LLMClient
 from blockrun_llm.types import APIError, ChatCompletionChunk, PaymentError
+
+from blockrun_litellm import _apikey
 
 try:
     from blockrun_llm import AsyncSolanaLLMClient, SolanaLLMClient
@@ -82,18 +86,205 @@ def _canonical_video_model(model: Optional[str]) -> Optional[str]:
     return model
 
 
-def _is_solana_url(api_url: Optional[str]) -> bool:
+# ---------------------------------------------------------------------------
+# Chain selection (wallet rail only)
+# ---------------------------------------------------------------------------
+# Solana is the default chain as of 0.10.0. It settles in roughly a second for
+# a fraction of a cent, where a Base settlement is both slower and dearer, so
+# it is the chain a new caller should land on without having to know there was
+# a choice.
+#
+# Flipping a default cannot brick a running deployment, though, and a host that
+# has only ever held a Base wallet would otherwise start failing the moment it
+# upgraded — its key is hex, and the SVM signer cannot use it. So the flip is
+# conditional on what is actually on the box: an implicit default picks Base,
+# loudly, when Base is the only credential present. Anything explicit
+# (``BLOCKRUN_CHAIN``, ``BLOCKRUN_API_URL``, an ``api_url`` argument) always
+# wins over both, including a ``BLOCKRUN_CHAIN=solana`` on a host with no
+# Solana wallet — that must fail with "no wallet", not silently serve Base.
+
+_CHAIN_ALIASES: Dict[str, str] = {
+    "solana": SOLANA_API_URL,
+    "sol": SOLANA_API_URL,
+    "svm": SOLANA_API_URL,
+    "base": BASE_API_URL,
+    "evm": BASE_API_URL,
+}
+
+_SOLANA_KEY_ENVS = ("SOLANA_WALLET_KEY",)
+_BASE_KEY_ENVS = ("BLOCKRUN_WALLET_KEY", "BASE_CHAIN_WALLET_KEY")
+# Written by the SDK's interactive wallet setup; the same files it auto-loads.
+_SOLANA_SESSION = Path.home() / ".blockrun" / ".solana-session"
+_BASE_SESSION = Path.home() / ".blockrun" / ".session"
+# Where the BlockRun CLI/SDK records a chain the user picked interactively.
+# Honouring it is not a nicety: someone who ran the setup flow and chose Base
+# has already answered this question, and a default that ignores their answer
+# is a worse failure than the one the default exists to prevent.
+#
+# Order matters, and not hypothetically — both files exist on a real machine
+# here and DISAGREE (``payment-chain`` says solana, the older ``.chain`` says
+# base). ``payment-chain`` is the current name and wins; ``.chain`` is the
+# legacy spelling, read only so an older install still gets an answer.
+_CHAIN_FILES = (
+    Path.home() / ".blockrun" / "payment-chain",
+    Path.home() / ".blockrun" / ".chain",
+)
+
+
+def _chain_from_file() -> Optional[str]:
+    """The chain the CLI last wrote, if any. Unreadable or empty means absent."""
+    for path in _CHAIN_FILES:
+        try:
+            if path.is_file():
+                value = path.read_text().strip().lower()
+                if value in _CHAIN_ALIASES:
+                    return value
+                if value:
+                    _log.warning("%s contains %r, which is not a known chain", path, value)
+        except OSError:
+            continue
+    return None
+
+
+def _chain_from_key(private_key: Optional[str]) -> Optional[str]:
+    """Infer the chain from an explicitly passed wallet key's shape.
+
+    A Base key is 32 hex bytes, with or without the ``0x``; a Solana key is
+    base58 and neither. When a caller hands us a specific key, its own format
+    is a better answer than anything on disk — the key on the call is the
+    wallet that will pay, and routing it to the other chain's signer fails.
+    """
+    if not private_key:
+        return None
+    candidate = private_key.strip()
+    body = candidate[2:] if candidate.lower().startswith("0x") else candidate
+    if len(body) == 64:
+        try:
+            int(body, 16)
+        except ValueError:
+            return "solana"
+        return "base"
+    return "solana" if candidate else None
+
+
+def _has_wallet(envs: Any, session: Path) -> bool:
+    if any(os.environ.get(name) for name in envs):
+        return True
+    try:
+        return session.is_file()
+    except OSError:  # unreadable home dir — treat as absent, never crash
+        return False
+
+
+# The credential probe touches the filesystem, so it is memoized against the
+# env vars that can change its answer. Re-statting ~/.blockrun on every request
+# would be a syscall per completion for a value that almost never moves.
+_default_url_cache: Dict[Any, str] = {}
+
+
+def _default_wallet_api_url(private_key: Optional[str] = None) -> str:
+    """Gateway URL when nothing explicit says which chain to use.
+
+    Precedence below the env/URL settings: an explicitly passed key's own shape,
+    then the chain the CLI recorded, then what wallets exist on the host.
+    """
+    chain = (os.environ.get("BLOCKRUN_CHAIN") or "").strip().lower()
+    if chain:
+        resolved = _CHAIN_ALIASES.get(chain)
+        if resolved:
+            return resolved
+        _log.warning(
+            "BLOCKRUN_CHAIN=%r is not a known chain (expected one of %s); "
+            "falling back to auto-detection",
+            chain,
+            ", ".join(sorted(_CHAIN_ALIASES)),
+        )
+    from_key = _chain_from_key(private_key)
+    if from_key:
+        return _CHAIN_ALIASES[from_key]
+    from_file = _chain_from_file()
+    if from_file:
+        return _CHAIN_ALIASES[from_file]
+    cache_key = tuple(os.environ.get(name, "") for name in _SOLANA_KEY_ENVS + _BASE_KEY_ENVS)
+    cached = _default_url_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if not _has_wallet(_SOLANA_KEY_ENVS, _SOLANA_SESSION) and _has_wallet(
+        _BASE_KEY_ENVS, _BASE_SESSION
+    ):
+        _log.warning(
+            "Solana is now the default BlockRun chain, but only a Base wallet was "
+            "found on this host, so this process keeps using Base. Set "
+            "BLOCKRUN_CHAIN=base to make that explicit (and silence this warning), "
+            "or set SOLANA_WALLET_KEY to move to Solana."
+        )
+        resolved = BASE_API_URL
+    else:
+        resolved = SOLANA_API_URL
+    _default_url_cache[cache_key] = resolved
+    return resolved
+
+
+def resolve_api_url(
+    api_url: Optional[str] = None, private_key: Optional[str] = None
+) -> str:
+    """The gateway URL a wallet-rail call will actually use.
+
+    Precedence: explicit argument, then ``BLOCKRUN_API_URL``, then the chain
+    default. Always concrete — callers pass the result straight to an SDK
+    client rather than relying on the SDK's own (Base) default, which no longer
+    matches ours.
+    """
+    return (
+        api_url
+        or os.environ.get("BLOCKRUN_API_URL")
+        or _default_wallet_api_url(private_key)
+    )
+
+
+def _reset_chain_cache_for_tests() -> None:
+    _default_url_cache.clear()
+
+
+def _is_solana_url(api_url: Optional[str], private_key: Optional[str] = None) -> bool:
     """Sniff whether the effective gateway URL points at Solana.
 
-    Falls back to the ``BLOCKRUN_API_URL`` env var when no explicit
-    ``api_url`` is passed. This matters for the FastAPI sidecar: the
+    Falls back to ``BLOCKRUN_API_URL`` and then the chain default when no
+    explicit ``api_url`` is passed. This matters for the FastAPI sidecar: the
     request handlers don't forward an ``api_url`` arg, so without the
     env-var fallback we'd silently route Solana traffic to the Base
     async client and crash inside the EVM payment encoder
     (``eth_abi.AddressEncoder`` rejects base58 mint addresses).
     """
-    resolved = api_url or os.environ.get("BLOCKRUN_API_URL", "")
-    return bool(resolved) and "sol.blockrun.ai" in resolved
+    return "sol.blockrun.ai" in resolve_api_url(api_url, private_key)
+
+
+# ---------------------------------------------------------------------------
+# Rail selection (API key vs wallet)
+# ---------------------------------------------------------------------------
+
+
+def _route_key(api_key: Optional[str], private_key: Optional[str]) -> Optional[str]:
+    """The BlockRun API key serving this call, or ``None`` for the wallet rail.
+
+    ``private_key`` is consulted too because that is the argument LiteLLM's
+    ``api_key`` lands in (see :mod:`blockrun_litellm.provider`), so
+    ``litellm.completion(..., api_key="brk_live_...")`` picks the account rail
+    without the caller needing a second parameter name. A hex or base58 wallet
+    key cannot be mistaken for one — see :func:`_apikey.looks_like_api_key`.
+
+    Passing BOTH an account key and a wallet key is refused rather than ranked.
+    There is no reading of that call that is obviously right, and the two
+    choices spend different money: guessing would either bill an account the
+    caller meant to leave alone or move USDC out of a wallet they did not
+    intend to touch.
+    """
+    if _apikey.looks_like_api_key(api_key) and private_key:
+        raise ValueError(
+            "Pass either api_key (a brk_ account key) or private_key (an x402 "
+            "wallet key), not both — they bill different money."
+        )
+    return _apikey.resolve_api_key(api_key, private_key)
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +341,17 @@ def _wallet_env_var(api_url: Optional[str]) -> str:
 
 
 def _client_key(api_url: Optional[str], private_key: Optional[str]) -> str:
-    chain = "solana" if _is_solana_url(api_url) else "base"
+    """Cache key for a wallet client, with the key itself hashed.
+
+    The raw private key used to be part of this string, and these keys are dict
+    keys — they surface in a ``repr`` of the cache, in a KeyError, in anything
+    that dumps locals during a crash. Hashing costs nothing here and takes a
+    wallet key out of every one of those paths.
+    """
+    chain = "solana" if _is_solana_url(api_url, private_key) else "base"
     fallback_env = os.environ.get(_wallet_env_var(api_url), "")
-    return f"{chain}::{api_url or ''}::{private_key or fallback_env}"
+    secret = hashlib.sha256((private_key or fallback_env).encode()).hexdigest()
+    return f"{chain}::{api_url or ''}::{secret}"
 
 
 def get_sync_client(
@@ -178,11 +377,15 @@ def get_sync_client(
                 # explicit key was passed.
                 client = SolanaLLMClient(
                     private_key=private_key,
-                    api_url=api_url or SOLANA_API_URL,
+                    api_url=resolve_api_url(api_url),
                     timeout=_CHAT_TIMEOUT,
                 )
             else:
-                client = LLMClient(private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT)
+                client = LLMClient(
+                    private_key=private_key,
+                    api_url=resolve_api_url(api_url),
+                    timeout=_CHAT_TIMEOUT,
+                )
             _sync_clients[key] = client
         return client
 
@@ -210,12 +413,14 @@ def get_async_client(
                     )
                 client = AsyncSolanaLLMClient(
                     private_key=private_key,
-                    api_url=api_url or SOLANA_API_URL,
+                    api_url=resolve_api_url(api_url),
                     timeout=_CHAT_TIMEOUT,
                 )
             else:
                 client = AsyncLLMClient(
-                    private_key=private_key, api_url=api_url, timeout=_CHAT_TIMEOUT
+                    private_key=private_key,
+                    api_url=resolve_api_url(api_url),
+                    timeout=_CHAT_TIMEOUT,
                 )
             _async_clients[key] = client
         return client
@@ -285,6 +490,14 @@ def _strip_real_cost(payload: Dict[str, Any], client: Any) -> Dict[str, Any]:
     return {"cost_usd": cost, "settlement": settlement}
 
 
+# The API-key rail settles against prepaid credit, off chain, so there is no
+# per-call charge to report and no settlement receipt to decode. Saying so
+# explicitly — rather than leaving the key absent — keeps the downstream
+# "real cost or estimate?" branch a single lookup on both rails, and makes the
+# absence deliberate rather than a hole someone later fills with an estimate.
+_NO_ONCHAIN_COST: Dict[str, Any] = {"cost_usd": None, "settlement": None, "rail": "api_key"}
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming entrypoints
 # ---------------------------------------------------------------------------
@@ -296,6 +509,7 @@ def chat_completion_sync(
     *,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
     **openai_kwargs: Any,
 ) -> Dict[str, Any]:
     """
@@ -309,6 +523,16 @@ def chat_completion_sync(
     For ``stream=True``, use :func:`chat_completion_stream_sync` instead.
     """
     openai_kwargs.pop("stream", None)
+    key = _route_key(api_key, private_key)
+    if key:
+        payload = _apikey.post_json(
+            "/v1/chat/completions",
+            {"model": model, "messages": messages, **_filter_kwargs(openai_kwargs)},
+            api_key=key,
+            timeout=_CHAT_TIMEOUT,
+        )
+        payload[_BLOCKRUN_META_KEY] = dict(_NO_ONCHAIN_COST)
+        return payload
     is_solana = _is_solana_url(api_url)
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_sync_client(api_url=api_url, private_key=private_key)
@@ -324,14 +548,27 @@ async def chat_completion_async(
     *,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
     **openai_kwargs: Any,
 ) -> Dict[str, Any]:
     """Async variant of :func:`chat_completion_sync`.
 
-    **Base only today.** Solana ``api_url`` raises ``NotImplementedError``
-    via :func:`get_async_client` since the SDK has no async Solana client.
+    **Base only today** on the wallet rail: a Solana ``api_url`` raises
+    ``NotImplementedError`` via :func:`get_async_client` since the SDK has no
+    async Solana client. The API-key rail has no such limit — it is plain HTTP
+    with no chain-specific signer — so async works there regardless.
     """
     openai_kwargs.pop("stream", None)
+    key = _route_key(api_key, private_key)
+    if key:
+        payload = await _apikey.apost_json(
+            "/v1/chat/completions",
+            {"model": model, "messages": messages, **_filter_kwargs(openai_kwargs)},
+            api_key=key,
+            timeout=_CHAT_TIMEOUT,
+        )
+        payload[_BLOCKRUN_META_KEY] = dict(_NO_ONCHAIN_COST)
+        return payload
     is_solana = _is_solana_url(api_url)
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_async_client(api_url=api_url, private_key=private_key)
@@ -352,6 +589,7 @@ def chat_completion_stream_sync(
     *,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
     **openai_kwargs: Any,
 ) -> Iterator[ChatCompletionChunk]:
     """
@@ -363,6 +601,14 @@ def chat_completion_stream_sync(
     ``GenericStreamingChunk``, FastAPI ``data: <json>\\n\\n``, etc.).
     """
     openai_kwargs.pop("stream", None)
+    key = _route_key(api_key, private_key)
+    if key:
+        yield from _apikey.stream_chat(
+            {"model": model, "messages": messages, **_filter_kwargs(openai_kwargs)},
+            api_key=key,
+            timeout=_CHAT_TIMEOUT,
+        )
+        return
     is_solana = _is_solana_url(api_url)
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_sync_client(api_url=api_url, private_key=private_key)
@@ -375,14 +621,25 @@ async def chat_completion_stream_async(
     *,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
     **openai_kwargs: Any,
 ) -> AsyncIterator[ChatCompletionChunk]:
     """Async variant of :func:`chat_completion_stream_sync`.
 
-    **Base only today.** A Solana ``api_url`` raises
-    ``NotImplementedError`` since the SDK has no async Solana client.
+    **Base only today** on the wallet rail: a Solana ``api_url`` raises
+    ``NotImplementedError`` since the SDK has no async Solana client. The
+    API-key rail is plain HTTP and has no such limit.
     """
     openai_kwargs.pop("stream", None)
+    key = _route_key(api_key, private_key)
+    if key:
+        async for chunk in _apikey.astream_chat(
+            {"model": model, "messages": messages, **_filter_kwargs(openai_kwargs)},
+            api_key=key,
+            timeout=_CHAT_TIMEOUT,
+        ):
+            yield chunk
+        return
     is_solana = _is_solana_url(api_url)
     kwargs = _filter_kwargs(openai_kwargs, is_solana=is_solana)
     client = get_async_client(api_url=api_url, private_key=private_key)
@@ -440,7 +697,7 @@ def get_image_client(
                     )
                 client = SolanaLLMClient(
                     private_key=private_key,
-                    api_url=api_url or SOLANA_API_URL,
+                    api_url=resolve_api_url(api_url),
                     # Raise the per-image-request timeout ceiling. The SDK caps
                     # each image POST at ``image_timeout`` (SolanaLLMClient
                     # default 200s); slow models such as ``openai/gpt-image-2``
@@ -455,7 +712,7 @@ def get_image_client(
                     image_timeout=_solana_image_timeout(),
                 )
             else:
-                client = ImageClient(private_key=private_key, api_url=api_url)
+                client = ImageClient(private_key=private_key, api_url=resolve_api_url(api_url))
             _image_clients[key] = client
         return client
 
@@ -537,6 +794,72 @@ def _invoke_image_edit(
     return client.edit(prompt, image, **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# API-key bodies for the media surfaces
+# ---------------------------------------------------------------------------
+# The SDK builds these bodies itself and they are not exported, so the API-key
+# rail rebuilds them here. They must match what the SDK sends — including its
+# defaults for an omitted model or size — or the two rails would answer the
+# same call with different pictures. The defaults are read off the SDK classes
+# rather than copied, so a default that moves upstream moves here too.
+
+
+def _image_defaults() -> tuple:
+    return ImageClient.DEFAULT_MODEL, ImageClient.DEFAULT_SIZE
+
+
+def _image_body(
+    prompt: str,
+    *,
+    model: Optional[str],
+    size: Optional[str],
+    n: int,
+    quality: Optional[str],
+) -> Dict[str, Any]:
+    default_model, default_size = _image_defaults()
+    body: Dict[str, Any] = {
+        "model": model or default_model,
+        "prompt": prompt,
+        "size": size or default_size,
+        "n": n,
+    }
+    # No chain here, so no `quality` suppression: the Solana-only rule exists
+    # because the Base gateway has no such field, and which gateway serves an
+    # account call is BlockRun's routing decision, not the caller's. Forwarding
+    # it lets the account API accept or ignore it the way it does for any other
+    # OpenAI Images parameter.
+    if quality is not None:
+        body["quality"] = quality
+    return body
+
+
+def _image_edit_body(
+    prompt: str,
+    image: Any,
+    *,
+    model: Optional[str],
+    mask: Optional[str],
+    size: Optional[str],
+    n: int,
+    quality: Optional[str],
+) -> Dict[str, Any]:
+    # ``openai/gpt-image-2`` is ImageClient.edit's own hardcoded default and has
+    # no class constant to read, so it is repeated rather than referenced.
+    _, default_size = _image_defaults()
+    body: Dict[str, Any] = {
+        "model": model or "openai/gpt-image-2",
+        "prompt": prompt,
+        "image": image,
+        "size": size or default_size,
+        "n": n,
+    }
+    if mask is not None:
+        body["mask"] = mask
+    if quality is not None:
+        body["quality"] = quality
+    return body
+
+
 def image_generation_sync(
     prompt: str,
     *,
@@ -546,7 +869,16 @@ def image_generation_sync(
     quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    key = _route_key(api_key, private_key)
+    if key:
+        return _apikey.post_json(
+            "/v1/images/generations",
+            _image_body(prompt, model=model, size=size, n=n, quality=quality),
+            api_key=key,
+            timeout=_solana_image_timeout(),
+        )
     client = get_image_client(api_url=api_url, private_key=private_key)
     response = _invoke_image_generate(
         client, prompt, model=model, size=size, n=n, quality=quality
@@ -563,7 +895,16 @@ async def image_generation_async(
     quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    key = _route_key(api_key, private_key)
+    if key:
+        return await _apikey.apost_json(
+            "/v1/images/generations",
+            _image_body(prompt, model=model, size=size, n=n, quality=quality),
+            api_key=key,
+            timeout=_solana_image_timeout(),
+        )
     client = get_image_client(api_url=api_url, private_key=private_key)
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
@@ -586,7 +927,18 @@ def image_edit_sync(
     quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    key = _route_key(api_key, private_key)
+    if key:
+        return _apikey.post_json(
+            "/v1/images/edits",
+            _image_edit_body(
+                prompt, image, model=model, mask=mask, size=size, n=n, quality=quality
+            ),
+            api_key=key,
+            timeout=_solana_image_timeout(),
+        )
     client = get_image_client(api_url=api_url, private_key=private_key)
     response = _invoke_image_edit(
         client,
@@ -612,7 +964,18 @@ async def image_edit_async(
     quality: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    key = _route_key(api_key, private_key)
+    if key:
+        return await _apikey.apost_json(
+            "/v1/images/edits",
+            _image_edit_body(
+                prompt, image, model=model, mask=mask, size=size, n=n, quality=quality
+            ),
+            api_key=key,
+            timeout=_solana_image_timeout(),
+        )
     client = get_image_client(api_url=api_url, private_key=private_key)
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
@@ -665,6 +1028,23 @@ _SPEECH_AWAIT_CEILING_S = 150.0  # SpeechClient DEFAULT_TIMEOUT 120s + margin
 _BASE_MEDIA_CLASSES = {"video": "VideoClient", "music": "MusicClient", "speech": "SpeechClient"}
 
 
+def _sdk_default(cls_name: str, attr: str) -> Optional[str]:
+    """A default model the SDK would have applied, read off its client class.
+
+    Looked up by name for the same reason :data:`_BASE_MEDIA_CLASSES` is: these
+    classes are imported lazily so an SDK that predates one of them degrades to
+    a clear error at call time rather than an ImportError at import time. The
+    API-key rail needs the values because it builds the request bodies the SDK
+    would otherwise have built, and a default that drifts upstream must drift
+    here too rather than being frozen into a copy.
+    """
+    import blockrun_llm
+
+    cls = getattr(blockrun_llm, cls_name, None)
+    value = getattr(cls, attr, None) if cls is not None else None
+    return value if isinstance(value, str) else None
+
+
 def _get_media_client(medium: str, api_url: Optional[str], private_key: Optional[str]) -> Any:
     """Dedicated Base client for ``medium``, or the unified SolanaLLMClient
     (which get_image_client already builds + caches) when the URL is Solana."""
@@ -677,7 +1057,7 @@ def _get_media_client(medium: str, api_url: Optional[str], private_key: Optional
     with _lock:
         client = _media_clients.get(key)
         if client is None:
-            client = base_cls(private_key=private_key, api_url=api_url)
+            client = base_cls(private_key=private_key, api_url=resolve_api_url(api_url))
             _media_clients[key] = client
         return client
 
@@ -764,6 +1144,7 @@ async def video_generation_async(
     model: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
     **params: Any,
 ) -> Dict[str, Any]:
     """Generate a video. Extra kwargs (see :data:`VIDEO_PARAM_KEYS`) forward to
@@ -771,12 +1152,25 @@ async def video_generation_async(
     arg). Client-supplied ``budget_seconds``/``timeout`` are clamped to the
     server cap so a request body can't pin a worker thread indefinitely; a
     malformed (non-numeric) value raises ValueError → HTTP 400 at the proxy."""
-    client = get_video_client(api_url=api_url, private_key=private_key)
+    key = _route_key(api_key, private_key)
     model = _canonical_video_model(model)
     params = {k: v for k, v in params.items() if v is not None}
     for knob in ("budget_seconds", "timeout"):
         if knob in params:
             params[knob] = min(float(params[knob]), _VIDEO_BUDGET_CAP_S)
+    if key:
+        # ``budget_seconds``/``timeout`` govern how long WE wait, not what the
+        # gateway is asked to do, so they steer the poll loop instead of riding
+        # along in the body — which is what the SDK does with them too.
+        budget = params.pop("budget_seconds", None) or params.pop("timeout", None)
+        params.pop("timeout", None)
+        body = {"model": model, "prompt": prompt, **params}
+        return await _run_media(
+            lambda: _apikey.submit_and_poll_video(body, api_key=key, budget_seconds=budget),
+            executor=_long_media_executor,
+            ceiling=_VIDEO_AWAIT_CEILING_S,
+        )
+    client = get_video_client(api_url=api_url, private_key=private_key)
     if _is_solana_client(client):
         video = _solana_media_method(client, "video")
         response = await _run_media(
@@ -802,9 +1196,28 @@ async def music_generation_async(
     lyrics: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a music track. Raises ValueError (→ HTTP 400 at the proxy) when
     ``lyrics`` is combined with ``instrumental=True`` — the SDK rejects that."""
+    if instrumental and lyrics and lyrics.strip():
+        raise ValueError("Cannot specify lyrics when instrumental is True")
+    key = _route_key(api_key, private_key)
+    if key:
+        body: Dict[str, Any] = {
+            "model": model or _sdk_default("MusicClient", "DEFAULT_MODEL"),
+            "prompt": prompt,
+            "instrumental": instrumental,
+        }
+        if lyrics and lyrics.strip():
+            body["lyrics"] = lyrics.strip()
+        return await _run_media(
+            lambda: _apikey.post_json(
+                "/v1/audio/generations", body, api_key=key, timeout=_MUSIC_AWAIT_CEILING_S
+            ),
+            executor=_long_media_executor,
+            ceiling=_MUSIC_AWAIT_CEILING_S,
+        )
     client = get_music_client(api_url=api_url, private_key=private_key)
     # Same call shape on both chains; only the method name differs.
     media_fn = (
@@ -827,11 +1240,25 @@ async def speech_generation_async(
     speed: Optional[float] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Synthesize speech (TTS)."""
-    client = get_speech_client(api_url=api_url, private_key=private_key)
+    key = _route_key(api_key, private_key)
     kw = {"model": model, "voice": voice, "response_format": response_format, "speed": speed}
     kw = {k: v for k, v in kw.items() if v is not None}
+    if key:
+        body = {
+            "model": model or _sdk_default("SpeechClient", "DEFAULT_MODEL"),
+            "input": input,
+            **kw,
+        }
+        return await _run_media(
+            lambda: _apikey.post_json(
+                "/v1/audio/speech", body, api_key=key, timeout=_SPEECH_AWAIT_CEILING_S
+            ),
+            ceiling=_SPEECH_AWAIT_CEILING_S,
+        )
+    client = get_speech_client(api_url=api_url, private_key=private_key)
     media_fn = (
         _solana_media_method(client, "speech") if _is_solana_client(client) else client.generate
     )
@@ -848,9 +1275,10 @@ async def sound_effect_async(
     response_format: Optional[str] = None,
     api_url: Optional[str] = None,
     private_key: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a cinematic sound effect."""
-    client = get_speech_client(api_url=api_url, private_key=private_key)
+    key = _route_key(api_key, private_key)
     kw = {
         "model": model,
         "duration_seconds": duration_seconds,
@@ -858,6 +1286,19 @@ async def sound_effect_async(
         "response_format": response_format,
     }
     kw = {k: v for k, v in kw.items() if v is not None}
+    if key:
+        body = {
+            "model": model or _sdk_default("SpeechClient", "DEFAULT_SOUNDFX_MODEL"),
+            "text": text,
+            **kw,
+        }
+        return await _run_media(
+            lambda: _apikey.post_json(
+                "/v1/audio/sound-effects", body, api_key=key, timeout=_SPEECH_AWAIT_CEILING_S
+            ),
+            ceiling=_SPEECH_AWAIT_CEILING_S,
+        )
+    client = get_speech_client(api_url=api_url, private_key=private_key)
     # Both SolanaLLMClient and SpeechClient expose .sound_effect with the same
     # shape; the guard only matters on SDK versions predating Solana media.
     if _is_solana_client(client):

@@ -3,7 +3,11 @@ Mode 1 example — LiteLLM Python library with the blockrun custom provider.
 
 Prereqs:
     pip install blockrun-litellm
-    export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_CHAIN_PRIVATE_KEY
+
+    # Pick ONE credential.
+    export BLOCKRUN_API_KEY=brk_live_...           # account credit (https://user.blockrun.ai)
+    export SOLANA_WALLET_KEY=YOUR_SOLANA_KEY       # or x402 on Solana (default chain)
+    export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_KEY     # or x402 on Base (BLOCKRUN_CHAIN=base)
 
 Run:
     python examples/python_lib.py

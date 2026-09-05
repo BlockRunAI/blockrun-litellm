@@ -34,8 +34,18 @@ def test_is_solana_url_recognizes_gateway():
 
 def test_is_solana_url_rejects_base():
     assert _is_solana_url("https://blockrun.ai/api") is False
-    assert _is_solana_url(None) is False
-    assert _is_solana_url("") is False
+
+
+def test_is_solana_url_defaults_to_solana_when_nothing_is_configured():
+    """An unconfigured host is a Solana host as of 0.10.0.
+
+    ``None`` and ``""`` both mean "no explicit URL", and both used to resolve
+    to Base by falling through to the SDK's own default. Pinning the new answer
+    here is the point: this is the behaviour change, and it must not be able to
+    revert quietly.
+    """
+    assert _is_solana_url(None) is True
+    assert _is_solana_url("") is True
 
 
 def test_filter_kwargs_keeps_tools_on_both_chains():

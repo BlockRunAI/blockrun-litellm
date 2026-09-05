@@ -3,9 +3,11 @@ Mode 2 example — point the official OpenAI SDK at the blockrun-litellm proxy.
 
 Prereqs:
     pip install 'blockrun-litellm[proxy]' openai
-    export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_CHAIN_PRIVATE_KEY
 
-Start the sidecar in another terminal:
+Start the sidecar in another terminal, with ONE credential:
+    blockrun-litellm-proxy --port 4001 --api-key brk_live_...   # account credit
+    # or:
+    export SOLANA_WALLET_KEY=YOUR_SOLANA_KEY                    # x402, Solana (default)
     blockrun-litellm-proxy --port 4001
 
 Then:

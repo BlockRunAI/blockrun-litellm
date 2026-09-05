@@ -16,6 +16,8 @@ import pytest
 
 from blockrun_llm.types import ChatChoice, ChatMessage, ChatResponse, ChatUsage
 
+from blockrun_litellm import _adapter, _apikey
+
 
 # ---------------------------------------------------------------------------
 # Canned response builder
@@ -56,10 +58,36 @@ def make_chat_response(
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _no_wallet_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make sure tests run without `BLOCKRUN_WALLET_KEY` set."""
-    monkeypatch.delenv("BLOCKRUN_WALLET_KEY", raising=False)
-    monkeypatch.delenv("BASE_CHAIN_WALLET_KEY", raising=False)
+def _no_wallet_required(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Run every test on a host with no credentials and no chain preference.
+
+    Since 0.10.0 the implicit chain default reads ``~/.blockrun`` twice — for a
+    chain the CLI recorded, and for which wallets exist. Left alone, the suite
+    would resolve a different default on a developer's laptop than in CI, which
+    is exactly the kind of test that passes everywhere except where it matters.
+    (It bit immediately: this machine has ``~/.blockrun/.chain`` set to "base".)
+    So both the session files and the chain files are pointed at a directory
+    that does not exist, the credential env vars are cleared, and the memoized
+    answer is dropped: every test starts on the documented default (Solana)
+    unless it says otherwise.
+    """
+    for name in (
+        "BLOCKRUN_WALLET_KEY",
+        "BASE_CHAIN_WALLET_KEY",
+        "SOLANA_WALLET_KEY",
+        "BLOCKRUN_API_KEY",
+        "BLOCKRUN_CHAIN",
+        "BLOCKRUN_API_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    absent = tmp_path_factory.mktemp("no-wallets") / "nowhere"
+    monkeypatch.setattr(_adapter, "_SOLANA_SESSION", absent / ".solana-session")
+    monkeypatch.setattr(_adapter, "_BASE_SESSION", absent / ".session")
+    monkeypatch.setattr(
+        _adapter, "_CHAIN_FILES", (absent / "payment-chain", absent / ".chain")
+    )
+    _adapter._reset_chain_cache_for_tests()
+    _apikey._reset_clients_for_tests()
 
 
 @pytest.fixture

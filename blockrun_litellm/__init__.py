@@ -1,7 +1,18 @@
 """
 blockrun-litellm — LiteLLM adapter for BlockRun.
 
-Two integration modes:
+Two ways to pay, chosen by which credential is present:
+
+* **API key** — ``BLOCKRUN_API_KEY=brk_live_...`` (issued at
+  https://user.blockrun.ai, topped up by card). Calls go to
+  ``api.blockrun.ai`` and are billed against prepaid credit. No wallet, no
+  chain, no USDC.
+* **x402 wallet** — ``SOLANA_WALLET_KEY`` (default chain) or
+  ``BLOCKRUN_WALLET_KEY`` (Base). Each call is signed locally by the
+  ``blockrun-llm`` SDK and settles on chain; your private key never leaves the
+  host. No account needed.
+
+Two integration modes, both of which work on either rail:
 
 1. **Custom provider** (in-process):
 
@@ -15,11 +26,8 @@ Two integration modes:
 
 2. **Local OpenAI-compatible proxy** (sidecar):
 
-    $ blockrun-litellm-proxy --port 4001
+    $ blockrun-litellm-proxy --port 4001 --api-key brk_live_...
     # then point LiteLLM at http://localhost:4001/v1
-
-The adapter delegates x402 wallet signing and payment to the
-``blockrun-llm`` SDK; your private key never leaves the host.
 """
 
 from blockrun_litellm.logger import enable_local_logging
@@ -40,4 +48,4 @@ __all__ = [
     "model_ids",
     "register",
 ]
-__version__ = "0.9.1"
+__version__ = "0.10.0"

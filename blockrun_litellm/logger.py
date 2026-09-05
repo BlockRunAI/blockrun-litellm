@@ -48,7 +48,10 @@ Each JSONL line is one row with these fields:
                      (``cost_source == "blockrun_x402"``); otherwise LiteLLM's
                      token×list-price estimate. ``0.0`` for free models,
                      ``None`` on failure.
-    cost_source    — "blockrun_x402" (real on-chain charge) or
+    cost_source    — "blockrun_x402" (real on-chain charge), "blockrun_account"
+                     (billed to prepaid credit via an API key — no per-call
+                     on-chain charge exists; the ledger at user.blockrun.ai is
+                     authoritative and ``cost_usd`` is only an estimate), or
                      "litellm_estimate" (fallback token×list-price guess)
     estimated_cost_usd — LiteLLM's token×list-price estimate, always recorded
                      alongside so the estimate vs real gap is auditable
@@ -158,23 +161,65 @@ def _extract_cost(response_obj: Any, kwargs: Dict[str, Any]) -> Optional[float]:
 
 
 def _extract_real_cost(response_obj: Any) -> Dict[str, Any]:
-    """Pull BlockRun's real x402 charge + settlement off the response.
+    """Pull BlockRun's real x402 charge, settlement and rail off the response.
 
-    Returns ``{"cost_usd": <real|None>, "settlement": <dict|None>}``. When a
-    real charge is present we record it as the authoritative ``cost_usd`` and
-    tag ``cost_source="blockrun_x402"``; otherwise the row falls back to
-    LiteLLM's token×list-price estimate (``cost_source="litellm_estimate"``).
+    Returns ``{"cost_usd": <real|None>, "settlement": <dict|None>,
+    "rail": <"api_key"|None>}``. When a real charge is present we record it as
+    the authoritative ``cost_usd`` and tag ``cost_source="blockrun_x402"``;
+    see :func:`_cost_fields` for what the other two cases mean.
     """
     try:
-        hp = _hidden_params(response_obj)
-        if hp and hp.get("blockrun_cost_usd") is not None:
+        hp = _hidden_params(response_obj) or {}
+        rail = hp.get("blockrun_rail")
+        if hp.get("blockrun_cost_usd") is not None:
             return {
                 "cost_usd": float(hp["blockrun_cost_usd"]),
                 "settlement": hp.get("blockrun_settlement"),
+                "rail": rail,
             }
+        if rail:
+            return {"cost_usd": None, "settlement": None, "rail": rail}
     except Exception:
         pass
-    return {"cost_usd": None, "settlement": None}
+    return {"cost_usd": None, "settlement": None, "rail": None}
+
+
+def _process_rail() -> Optional[str]:
+    """The rail this process is configured for, when the response didn't say.
+
+    Streaming is why this exists: the per-call marker rides on the assembled
+    response's ``_hidden_params``, and on the account rail there is no charge to
+    hang it off, so nothing puts it there. The sidecar and a
+    ``BLOCKRUN_API_KEY``-configured library process have exactly one rail for
+    their whole lifetime, which makes the env an honest fallback rather than a
+    guess.
+    """
+    from blockrun_litellm import _apikey
+
+    return "api_key" if _apikey.resolve_api_key() else None
+
+
+def _cost_fields(real: Dict[str, Any], estimate: Optional[float]) -> Dict[str, Any]:
+    """Resolve ``cost_usd`` + ``cost_source`` from what the call actually knows.
+
+    Three outcomes, and the difference between the last two is the point:
+
+    * ``blockrun_x402`` — ``cost_usd`` IS the settled on-chain charge.
+    * ``blockrun_account`` — the call was billed to prepaid account credit, so
+      there is no per-call on-chain charge and never will be. ``cost_usd`` here
+      is LiteLLM's token x list-price estimate (``None`` when LiteLLM has no
+      price for the model); the authoritative figure is the account ledger at
+      user.blockrun.ai. Tagging these ``litellm_estimate`` would say "we fell
+      back to a guess", implying a real number existed and was missed — it did
+      not, and a reconciliation job needs to be able to tell those apart.
+    * ``litellm_estimate`` — the wallet rail did not report a charge (older SDK,
+      free/cached call), so the estimate is standing in for one.
+    """
+    if real["cost_usd"] is not None:
+        return {"cost_usd": real["cost_usd"], "cost_source": "blockrun_x402"}
+    if (real.get("rail") or _process_rail()) == "api_key":
+        return {"cost_usd": estimate, "cost_source": "blockrun_account"}
+    return {"cost_usd": estimate, "cost_source": "litellm_estimate"}
 
 
 def _latency_ms(start_time: Any, end_time: Any) -> Optional[float]:
@@ -254,19 +299,14 @@ def _build_entry(
         return None
     estimate = _extract_cost(response_obj, kwargs)
     real = _extract_real_cost(response_obj)
-    if real["cost_usd"] is not None:
-        cost_usd = real["cost_usd"]
-        cost_source = "blockrun_x402"
-    else:
-        cost_usd = estimate
-        cost_source = "litellm_estimate"
+    cost = _cost_fields(real, estimate)
     entry.update({
         "status": "success",
         "completion": completion,
         "usage": usage,
         # Real wallet deduction when known (x402), else LiteLLM's estimate.
-        "cost_usd": cost_usd,
-        "cost_source": cost_source,
+        "cost_usd": cost["cost_usd"],
+        "cost_source": cost["cost_source"],
         # Keep LiteLLM's token×list-price estimate alongside for comparison.
         "estimated_cost_usd": estimate,
         "settlement": real["settlement"],
@@ -324,7 +364,11 @@ def log_proxy_call(
             "status": "success" if (http_status or 0) < 400 else "failure",
             "http_status": http_status,
             "cost_usd": cost_usd,
-            "cost_source": "blockrun_x402" if cost_usd is not None else None,
+            "cost_source": (
+                "blockrun_x402"
+                if cost_usd is not None
+                else ("blockrun_account" if _process_rail() == "api_key" else None)
+            ),
             "settlement": settlement,
             "request_id": request_id,
         }

@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.9.1"
-description = "LiteLLM adapter for BlockRun — call x402-paid AI models via LiteLLM (custom provider or local OpenAI-compatible proxy)"
+version = "0.10.0"
+description = "LiteLLM adapter for BlockRun — call 90+ AI models via LiteLLM with a BlockRun API key or an x402 USDC wallet (Solana or Base)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
     { name = "BlockRun", email = "hello@blockrun.ai" }
 ]
-keywords = ["litellm", "blockrun", "x402", "openai", "llm-proxy", "openrouter", "ai-gateway"]
+keywords = ["litellm", "blockrun", "x402", "openai", "llm-proxy", "openrouter", "ai-gateway", "solana", "api-key"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
