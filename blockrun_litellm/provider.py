@@ -169,13 +169,20 @@ def _attach_real_cost(response: litellm.ModelResponse, meta: Optional[Dict[str, 
     """
     if not meta:
         return
-    cost = meta.get("cost_usd")
-    if cost is None:
-        return
     hidden = getattr(response, "_hidden_params", None)
     if not isinstance(hidden, dict):
         hidden = {}
         response._hidden_params = hidden
+    # Which rail served the call, recorded whether or not a charge came with
+    # it. On the account rail there is no per-call charge to attach, and that
+    # absence is exactly what the audit row needs to be able to say — without
+    # the marker it is indistinguishable from "the SDK didn't report one",
+    # which is a different thing and points at a different remedy.
+    if meta.get("rail"):
+        hidden["blockrun_rail"] = meta["rail"]
+    cost = meta.get("cost_usd")
+    if cost is None:
+        return
     cost = float(cost)
     hidden["response_cost"] = cost
     hidden["blockrun_cost_usd"] = cost

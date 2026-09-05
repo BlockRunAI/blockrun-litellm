@@ -72,7 +72,7 @@ from pydantic import ValidationError
 from blockrun_llm.types import APIError, PaymentError
 from blockrun_llm.tx_log import decode_settlement_header
 
-from blockrun_litellm import _adapter
+from blockrun_litellm import _adapter, _apikey
 from blockrun_litellm import logger as _logger
 
 # Optional — present when blockrun-llm[solana] is installed alongside solana-py.
@@ -183,6 +183,16 @@ def healthz() -> Dict[str, str]:
 
 @app.get("/v1/models", dependencies=[Depends(_require_token)])
 async def list_models() -> Dict[str, Any]:
+    key = _proxy_api_key()
+    if key:
+        # The account API republishes the same catalogue, already in OpenAI
+        # list shape. Fetching it with the key (rather than anonymously from
+        # the gateway) keeps one upstream per rail — and this route must not
+        # build a wallet client, which is what the SDK path below does even
+        # though listing models costs nothing.
+        return await run_in_threadpool(
+            lambda: _apikey.get_json("/v1/models", api_key=key, timeout=60.0)
+        )
     # Reuse the cached async client; ``list_models`` does not require payment.
     client = _adapter.get_async_client()
     models = await client.list_models()
@@ -326,13 +336,37 @@ class _SolanaX402Transport(httpx.BaseTransport):
         self._base.close()
 
 
+def _proxy_api_key() -> Optional[str]:
+    """The BlockRun API key this sidecar serves with, if it has one.
+
+    Read per call rather than cached at import: ``main()`` may set
+    ``BLOCKRUN_API_KEY`` from ``--api-key`` after this module is imported, and
+    tests flip it between cases.
+    """
+    return _apikey.resolve_api_key()
+
+
 def _resolve_api_url() -> str:
-    return (os.environ.get("BLOCKRUN_API_URL") or _adapter.BASE_API_URL).rstrip("/")
+    """Upstream base URL for the passthrough routes, for whichever rail is on.
+
+    With a key that is the account API (which has no chain and no ``/api``
+    prefix); without one it is the gateway on the configured chain.
+    """
+    if _proxy_api_key():
+        return _apikey.api_base()
+    return _adapter.resolve_api_url().rstrip("/")
 
 
 def _messages_client(api_url: str) -> httpx.Client:
     """Cached httpx client whose transport signs x402 for any path on the chain
-    implied by ``api_url`` (Base via EIP-712, Solana via SVM)."""
+    implied by ``api_url`` (Base via EIP-712, Solana via SVM).
+
+    On the API-key rail there is nothing to sign, so this is the plain pooled
+    client — the Bearer header is added per request by the caller.
+    """
+    if _proxy_api_key():
+        return _apikey.sync_http()
+
     existing = _messages_http_clients.get(api_url)
     if existing is not None:
         return existing
@@ -563,11 +597,47 @@ async def _forward_passthrough(
       forwarding (Gemini strips ``?key=``/``?alt=sse``; the gateway re-derives
       both server-side).
     """
+    api_key = _proxy_api_key()
+    if api_key:
+        unsupported = _apikey.unsupported_reason(path)
+        if unsupported:
+            # Logged like any other exit, even though it is free and local: the
+            # 0.7.6 invariant is that every exit leaves a row, and a refusal
+            # nobody can see in the audit trail is a support ticket with no
+            # evidence behind it.
+            _logger.log_proxy_call(
+                model=model_override or _body_model(await request.body()),
+                path=path,
+                stream=False,
+                http_status=501,
+                cost_usd=None,
+                settlement=None,
+                latency_ms=0.0,
+                request_id=request.headers.get("x-request-id"),
+            )
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "error": {
+                        "message": unsupported,
+                        "type": "invalid_request_error",
+                        "code": "unsupported_on_api_key",
+                    }
+                },
+            )
+
     api_url = _resolve_api_url()
     raw = await request.body()
     client = _messages_client(api_url)
     qs = request.url.query if forward_query else ""
-    target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
+    if api_key:
+        # target_url applies the account API's path spellings (e.g. the OpenAI
+        # /v1/images/edits alias) — the gateway path is not always the one the
+        # account API publishes.
+        target = _apikey.target_url(path) + (f"?{qs}" if qs else "")
+        headers = _apikey.passthrough_headers(headers, api_key)
+    else:
+        target = f"{api_url}{path}" + (f"?{qs}" if qs else "")
 
     _t0 = time.monotonic()
     model = model_override or _body_model(raw)
@@ -947,7 +1017,12 @@ async def _media_endpoint(
     # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
     # global and these calls run for minutes. If it flipped mid-flight we would
     # classify a Solana charge as Base and write it off as free.
-    is_solana = _adapter._is_solana_url(None)
+    # The API-key rail is folded in under the same flag rather than given its
+    # own: the flag means "a post-gateway failure may still have moved money",
+    # and that is exactly true of a metered account call — the account is
+    # debited from the upstream usage the moment the gateway answers, whatever
+    # happens on the way back here.
+    is_solana = _adapter._is_solana_url(None) or bool(_proxy_api_key())
     async with _get_media_semaphore():
         try:
             result = await call()
@@ -1456,7 +1531,12 @@ async def _run_video_job(job: Dict[str, Any], prompt: str, kwargs: Dict[str, Any
     # Snapshot the chain NOW, not at log time: BLOCKRUN_API_URL is a mutable
     # global and these calls run for minutes. If it flipped mid-flight we would
     # classify a Solana charge as Base and write it off as free.
-    is_solana = _adapter._is_solana_url(None)
+    # The API-key rail is folded in under the same flag rather than given its
+    # own: the flag means "a post-gateway failure may still have moved money",
+    # and that is exactly true of a metered account call — the account is
+    # debited from the upstream usage the moment the gateway answers, whatever
+    # happens on the way back here.
+    is_solana = _adapter._is_solana_url(None) or bool(_proxy_api_key())
     async with _get_media_semaphore():
         job["status"] = "in_progress"
         try:
@@ -2040,9 +2120,24 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=4001, help="Bind port (default: 4001)")
     parser.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "BlockRun API key (brk_live_...). Pays from prepaid account credit "
+            "instead of an x402 wallet; no chain involved. Get one at "
+            f"{_apikey.PORTAL_URL}. Env: BLOCKRUN_API_KEY"
+        ),
+    )
+    parser.add_argument(
+        "--chain",
+        default=None,
+        choices=["solana", "base"],
+        help="Wallet-rail chain (default: solana). Ignored when --api-key is set.",
+    )
+    parser.add_argument(
         "--api-url",
         default=None,
-        help="Override BlockRun API URL (default: https://blockrun.ai/api)",
+        help="Override the BlockRun gateway URL (default: the --chain gateway)",
     )
     parser.add_argument(
         "--log-level",
@@ -2051,14 +2146,41 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.api_key:
+        os.environ["BLOCKRUN_API_KEY"] = args.api_key
+    if args.chain:
+        os.environ["BLOCKRUN_CHAIN"] = args.chain
     if args.api_url:
         os.environ["BLOCKRUN_API_URL"] = args.api_url
 
-    # Fail fast if no wallet — better than waiting for first request.
-    try:
-        _adapter.get_sync_client()
-    except ValueError as exc:
-        parser.exit(2, f"\nWallet not configured:\n  {exc}\n")
+    # Fail fast on a credential problem — better than waiting for first request.
+    #
+    # The two rails fail differently and the check has to match the one that is
+    # actually on, or the API-key path would be blocked by a wallet requirement
+    # it does not have. A key is only shape-checked here: proving it works means
+    # a network round trip, and a sidecar that will not boot because the account
+    # API is briefly unreachable is worse than one that answers 401 per request.
+    key = _apikey.resolve_api_key()
+    if key:
+        if not _apikey.looks_like_api_key(key):
+            parser.exit(
+                2,
+                f"\nBLOCKRUN_API_KEY does not look like a BlockRun key "
+                f"(expected a {_apikey.KEY_PREFIX}... prefix).\n",
+            )
+        log.info("serving on the API-key rail via %s", _apikey.api_base())
+    else:
+        try:
+            _adapter.get_sync_client()
+        except ValueError as exc:
+            parser.exit(
+                2,
+                f"\nNo credential configured:\n  {exc}\n\n"
+                f"Either set a wallet key, or use a BlockRun API key:\n"
+                f"  blockrun-litellm-proxy --api-key brk_live_...\n"
+                f"  (get one at {_apikey.PORTAL_URL})\n",
+            )
+        log.info("serving on the x402 wallet rail via %s", _adapter.resolve_api_url())
 
     import uvicorn
 

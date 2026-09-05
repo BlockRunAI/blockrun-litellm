@@ -1,7 +1,9 @@
 # LiteLLM Proxy Server config — routes through the blockrun-litellm sidecar.
 #
-# 1) Start the sidecar:
-#       export BLOCKRUN_WALLET_KEY=0xYOUR_KEY
+# 1) Start the sidecar with ONE credential:
+#       blockrun-litellm-proxy --port 4001 --api-key brk_live_...   # account credit
+#    or, to pay per call from an x402 wallet (Solana is the default chain):
+#       export SOLANA_WALLET_KEY=YOUR_SOLANA_PRIVATE_KEY
 #       blockrun-litellm-proxy --port 4001
 #
 # 2) Start LiteLLM Proxy with this file:

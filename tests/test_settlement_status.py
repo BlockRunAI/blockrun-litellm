@@ -73,7 +73,9 @@ def _solana(monkeypatch):
 
 
 def _base(monkeypatch):
+    # Base has to be asked for since 0.10.0 — an unset gateway URL means Solana.
     monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)
+    monkeypatch.setenv("BLOCKRUN_CHAIN", "base")
 
 
 def _last_row(path) -> Dict[str, Any]:

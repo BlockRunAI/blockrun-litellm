@@ -266,7 +266,7 @@ class TestArgumentForwarding:
         a drop-in-compatible route — but surface the drop in a header so it
         isn't the silent no-op 0.6.1 had.
         """
-        monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)  # Base
+        monkeypatch.setenv("BLOCKRUN_CHAIN", "base")
         mock = _mock_adapter(monkeypatch, "image_generation_async", return_value=dict(OK_RESULT))
         response = client.post(
             "/v1/images/generations",
@@ -277,7 +277,7 @@ class TestArgumentForwarding:
         assert "Solana only" in response.headers.get("x-blockrun-warning", "")
 
     def test_image_edit_quality_on_base_is_served_dropped_and_warned(self, client, monkeypatch):
-        monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)
+        monkeypatch.setenv("BLOCKRUN_CHAIN", "base")
         mock = _mock_adapter(monkeypatch, "image_edit_async", return_value=dict(OK_RESULT))
         response = client.post(
             "/v1/images/edits",

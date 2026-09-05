@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/blockrun-litellm.svg)](https://pypi.org/project/blockrun-litellm/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code. **Base and Solana chains supported.**
+LiteLLM adapter for [BlockRun](https://blockrun.ai) — call 90+ AI models through [LiteLLM](https://github.com/BerriAI/litellm) with zero changes to your existing code. Pay with a **BlockRun API key** (card top-up, no wallet) or with an **x402 USDC wallet** on **Solana or Base**.
 
 📚 **Full docs in [`docs/`](docs/)** — bilingual (English + 中文):
 - [`CUSTOMER-ONBOARDING`](docs/CUSTOMER-ONBOARDING.md) / [`中文`](docs/CUSTOMER-ONBOARDING.zh.md) — 5-minute walkthrough, both modes
@@ -14,9 +14,46 @@ LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models
 - [Chat Completions API](https://blockrun.ai/docs/api-reference/chat-completions)
 - [Models & pricing](https://blockrun.ai/docs/api-reference/models)
 
-> **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. The only thing that differs is *authentication*: BlockRun uses per-request x402 wallet signatures (non-custodial USDC micropayments on Base / Solana), not a Bearer API key. This package bridges that gap.
+> **TL;DR** — BlockRun's `/v1/chat/completions` is already OpenAI-compatible at the protocol level. What differs is *billing*. Two ways to settle: an ordinary API key billed against prepaid credit, or per-request x402 wallet signatures (non-custodial USDC on Solana / Base). This package handles both, and everything above the credential is identical.
 
 [中文文档见底部 / Chinese docs at the bottom](#中文文档)
+
+---
+
+## Get an API key (30 seconds)
+
+1. Sign in at **[user.blockrun.ai](https://user.blockrun.ai)** with Google.
+2. **Billing → Add credit.** Card payment, $5 minimum. The processing fee (5.5% + $0.30) is charged at purchase, so every model then bills at the published list price — no per-call minimum, no per-call fee, no markup.
+3. **API keys → Create key.** You get a `brk_live_…` key, shown once.
+
+```bash
+export BLOCKRUN_API_KEY=brk_live_...
+```
+
+That is the whole setup. No wallet, no chain, no USDC, no gas.
+
+Prefer to pay from a wallet you control? Skip to [**Pay with an x402 wallet**](#pay-with-an-x402-wallet-solana--base) — it needs no account at all.
+
+---
+
+## Two ways to pay
+
+|  | **API key** | **x402 wallet** |
+|---|---|---|
+| Set up | Sign in at [user.blockrun.ai](https://user.blockrun.ai), top up by card | Fund a wallet with USDC |
+| Credential | `BLOCKRUN_API_KEY=brk_live_…` | `SOLANA_WALLET_KEY` / `BLOCKRUN_WALLET_KEY` |
+| Endpoint | `https://api.blockrun.ai` | `https://sol.blockrun.ai/api` (default) or `https://blockrun.ai/api` |
+| Billing | Prepaid credit, debited at list price | Per-call USDC settled on chain |
+| Account needed | Yes | **No** |
+| Chain | None — payment never touches a chain | Solana or Base |
+| Per-call cost reported | No — see the ledger at [user.blockrun.ai](https://user.blockrun.ai) | **Yes** — the exact settled charge, per call |
+| Where spend shows up | Dashboard → Activity | The chain, plus `x-blockrun-settlement` |
+| Native Gemini (`/v1beta`) | Not available | Available |
+| Extras to install | none | `[solana]` for the Solana signer |
+
+Everything else is the same on both: the same model catalogue, the same OpenAI/Anthropic wire formats, the same streaming, the same native fingerprint passthrough.
+
+**Precedence.** A key wins whenever one is present. `BLOCKRUN_API_KEY` (or `--api-key`, or `api_key="brk_live_…"` on a call) selects the API-key rail; with no key the adapter falls back to the wallet rail. Wallet keys are never confused with account keys — only a `brk_` prefix selects the account rail, and no private-key format starts with one.
 
 ---
 
@@ -27,65 +64,89 @@ LiteLLM adapter for [BlockRun](https://blockrun.ai) — call x402-paid AI models
 | **1. Custom provider** (in-process) | Apps using the LiteLLM **Python library** | `litellm.completion(model="blockrun/openai/gpt-5.5", ...)` |
 | **2. Local proxy** (sidecar) | Apps using the LiteLLM **Proxy Server** (or any OpenAI client) | `api_base="http://localhost:4001/v1"` |
 
-Both modes share the same underlying wallet/signing flow (via the [`blockrun-llm`](https://github.com/BlockRunAI/blockrun-llm) SDK), so they behave identically. Pick whichever fits your deployment.
-
-### Verified end-to-end against the live BlockRun gateway
-
-Both modes have been validated against `https://blockrun.ai/api` using the free `nvidia/deepseek-v4-flash` model:
-
-```
-$ python -c "
-> import litellm
-> from blockrun_litellm import register; register()
-> r = litellm.completion(
->     model='blockrun/nvidia/deepseek-v4-flash',
->     messages=[{'role':'user','content':'Reply with exactly: pong'}],
->     max_tokens=20, temperature=0.0)
-> print(r.choices[0].message.content)"
-pong
-
-$ curl -sS http://127.0.0.1:4001/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"model":"nvidia/deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: proxy-ok"}]}'
-{"id":"a710c144c68c42f7a319fb93e9b9b5a0","object":"chat.completion","model":"nvidia/deepseek-v4-flash",
- "choices":[{"index":0,"message":{"role":"assistant","content":"proxy-ok"},...}],"usage":{...}}
-```
+Both modes work on both rails and behave identically. Pick whichever fits your deployment.
 
 ---
 
 ## Install
 
 ```bash
-# Base chain only — minimal
+# API key, or a Solana/Base wallet used from the Python library
 pip install blockrun-litellm
 
-# Base chain + local OpenAI-compatible proxy (FastAPI/uvicorn)
+# ...plus the local OpenAI-compatible proxy (FastAPI/uvicorn)
 pip install 'blockrun-litellm[proxy]'
 
-# Base + Solana (adds the x402 SVM toolchain)
+# ...plus the x402 SVM signer, needed ONLY to pay from a Solana wallet
 pip install 'blockrun-litellm[proxy,solana]'
 ```
 
-Requires Python ≥ 3.9.
-
-## Chains supported
-
-| Chain | Gateway URL | Wallet env var | Status |
-|---|---|---|---|
-| Base (USDC) | `https://blockrun.ai/api` *(default)* | `BLOCKRUN_WALLET_KEY` | sync + async, streaming |
-| Solana (USDC) | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | sync + async, streaming on both (since 0.3.1) |
-
-To route on Solana, pass `api_base="https://sol.blockrun.ai/api"` plus `api_key=<solana-key>` to `litellm.completion(...)` — the adapter detects the chain from the URL and uses the right SDK client.
+Requires Python ≥ 3.9. On the API-key rail the `solana` extra is unnecessary — there is no signing to do.
 
 ---
 
-## Configure your wallet (one-time)
+## Quick start
 
-The `blockrun-llm` SDK signs each request locally with an EVM (Base chain) private key. **The key never leaves your machine.** Three ways to provide it:
+### With an API key
+
+```python
+import litellm
+from blockrun_litellm import register
+
+register()  # idempotent; adds "blockrun" to litellm.custom_provider_map
+
+# BLOCKRUN_API_KEY is read from the environment; or pass api_key= per call.
+r = litellm.completion(
+    model="blockrun/openai/gpt-5.5",
+    messages=[{"role": "user", "content": "Hello"}],
+    max_tokens=64,
+)
+print(r.choices[0].message.content)
+```
+
+Or as a sidecar for anything that speaks OpenAI HTTP:
+
+```bash
+blockrun-litellm-proxy --port 4001 --api-key brk_live_...
+curl -s http://127.0.0.1:4001/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-5.5","messages":[{"role":"user","content":"hi"}]}'
+```
+
+If all you want is chat, you do not need this package at all on the API-key rail — `https://api.blockrun.ai/v1` is OpenAI-compatible, so any OpenAI SDK works by changing `base_url`. The package earns its place when you want LiteLLM routing/fallbacks, the local audit log, or the media and Anthropic surfaces under one proxy.
+
+---
+
+## Pay with an x402 wallet (Solana / Base)
+
+No account, no sign-up: fund a wallet with USDC and every request settles itself. This is the agent-native path — an autonomous agent can hold a wallet, but it cannot fill in a card form.
+
+### Chains supported
+
+| Chain | Gateway URL | Wallet env var | Notes |
+|---|---|---|---|
+| **Solana (USDC)** — *default* | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | Sub-second settlement, lowest fee. Needs the `[solana]` extra. Sync + async, streaming. |
+| Base (USDC) | `https://blockrun.ai/api` | `BLOCKRUN_WALLET_KEY` | Sync + async, streaming. |
+
+**Solana is the default chain as of 0.10.0.** Previously an unconfigured host used Base. Pick a chain explicitly with `BLOCKRUN_CHAIN`:
+
+```bash
+export BLOCKRUN_CHAIN=solana   # default
+export BLOCKRUN_CHAIN=base
+```
+
+or point at a gateway directly with `BLOCKRUN_API_URL` / `--api-url` / `api_base=` (which always wins over `BLOCKRUN_CHAIN`).
+
+> **Upgrading from ≤ 0.9.x on Base?** Nothing breaks. When no chain is configured and the host holds *only* a Base wallet, the adapter keeps using Base and logs a one-line warning. Set `BLOCKRUN_CHAIN=base` to make the choice explicit and silence it.
+
+### Configure your wallet (one-time)
+
+The `blockrun-llm` SDK signs each request locally. **The key never leaves your machine** — only signatures travel.
 
 ```bash
 # Option A — environment variable (recommended for servers)
-export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_CHAIN_PRIVATE_KEY
+export SOLANA_WALLET_KEY=YOUR_SOLANA_PRIVATE_KEY      # Solana (default chain)
+export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_PRIVATE_KEY    # Base
 
 # Option B — auto-create + fund a new wallet (interactive, shows QR for funding)
 python -c "from blockrun_llm import setup_agent_wallet; setup_agent_wallet()"
@@ -94,6 +155,25 @@ python -c "from blockrun_llm import setup_agent_wallet; setup_agent_wallet()"
 ```
 
 > 💡 To validate without spending real USDC, use a free model like `nvidia/deepseek-v4-flash` — same code path, same wallet flow, $0 settlement.
+
+---
+
+## What each rail can serve
+
+Every surface below works on both rails except where noted.
+
+| Surface | API key | Wallet |
+|---|---|---|
+| `POST /v1/chat/completions` (+ streaming) | ✅ | ✅ |
+| `POST /v1/messages` — native Anthropic | ✅ | ✅ |
+| `POST /v1/responses` — OpenAI Responses | ✅ | ✅ |
+| `POST /v1/images/generations`, `/v1/images/edits` | ✅ | ✅ |
+| `POST /v1/videos`, `/v1/videos/generations` (+ poll, download) | ✅ | ✅ |
+| `POST /v1/audio/speech`, `/v1/audio/generations`, `/v1/audio/sound-effects` | ✅ | ✅ |
+| `GET /v1/models` | ✅ | ✅ |
+| `POST /v1beta/models/{model}:generateContent` — **native Gemini** | ❌ 501 | ✅ |
+
+Native Gemini is the one gap: `api.blockrun.ai` does not publish `/v1beta`. The proxy answers 501 with that explanation rather than a bare 404. Gemini models themselves are reachable on both rails through `/v1/chat/completions` (`model="google/gemini-3-pro"`); only Google's own protocol needs a wallet.
 
 ---
 
@@ -139,14 +219,22 @@ assert is_known_model("blockrun/anthropic/claude-opus-5")
 The gateway is authoritative and accepts newly released IDs before a package
 update; query `https://blockrun.ai/api/v1/models` whenever you need live metadata.
 
-### 1c. Override the wallet per-call (optional)
+### 1c. Override the credential per-call (optional)
+
+`api_key` carries either credential — the `brk_` prefix decides which rail serves the call, so one parameter covers both and existing wallet code is untouched:
 
 ```python
-response = litellm.completion(
-    model="blockrun/openai/gpt-5.5",
-    messages=[...],
-    api_key="0xANOTHER_PRIVATE_KEY",          # passed to blockrun-llm as wallet
-)
+# Account rail — billed to prepaid credit
+litellm.completion(model="blockrun/openai/gpt-5.5", messages=[...],
+                   api_key="brk_live_...")
+
+# Wallet rail — x402, signed locally
+litellm.completion(model="blockrun/openai/gpt-5.5", messages=[...],
+                   api_key="0xANOTHER_PRIVATE_KEY")
+
+# Wallet rail, specific chain
+litellm.completion(model="blockrun/openai/gpt-5.5", messages=[...],
+                   api_base="https://blockrun.ai/api", api_key="0xBASE_KEY")
 ```
 
 ### 1d. Async
@@ -173,10 +261,16 @@ If you're running the **LiteLLM Proxy Server** (`litellm --config config.yaml`),
 ### 2a. Start the proxy
 
 ```bash
-export BLOCKRUN_WALLET_KEY=0xYOUR_KEY
+# API-key rail
+blockrun-litellm-proxy --port 4001 --api-key brk_live_...
+
+# x402 wallet rail (Solana by default)
+export SOLANA_WALLET_KEY=YOUR_SOLANA_PRIVATE_KEY
 blockrun-litellm-proxy --port 4001
 # → uvicorn running at http://127.0.0.1:4001
 ```
+
+The sidecar fails fast at startup if it has neither credential, and tells you which rail it picked.
 
 Flags:
 
@@ -184,15 +278,22 @@ Flags:
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind interface. **Keep loopback** unless you set `BLOCKRUN_PROXY_TOKEN`. |
 | `--port` | `4001` | Bind port |
-| `--api-url` | `https://blockrun.ai/api` | Override BlockRun gateway endpoint |
+| `--api-key` | *(unset)* | BlockRun API key (`brk_live_…`). Selects the account rail; no chain involved. Env: `BLOCKRUN_API_KEY` |
+| `--chain` | `solana` | Wallet-rail chain: `solana` or `base`. Ignored with `--api-key`. Env: `BLOCKRUN_CHAIN` |
+| `--api-url` | *(the `--chain` gateway)* | Override the gateway endpoint outright |
 | `--log-level` | `info` | `critical`/`error`/`warning`/`info`/`debug`/`trace` |
 
 Environment variables (no CLI flag):
 
 | Env var | Default | Purpose |
 |---|---|---|
+| `BLOCKRUN_API_KEY` | *(unset)* | Account key. When set, every route serves from prepaid credit. |
+| `BLOCKRUN_API_BASE_URL` | `https://api.blockrun.ai` | Account API endpoint (staging overrides). |
+| `BLOCKRUN_CHAIN` | `solana` | Wallet-rail chain. |
 | `BLOCKRUN_MAX_CONCURRENT` | `100` | Max in-flight requests. Excess requests queue inside the sidecar. See table below for tuning guidance. |
-| `BLOCKRUN_PROXY_TOKEN` | *(unset)* | Optional Bearer token guard on all sidecar endpoints. |
+| `BLOCKRUN_PROXY_TOKEN` | *(unset)* | Optional Bearer token guard on all sidecar endpoints. Never forwarded upstream. |
+
+> **The credential stays in the sidecar.** Clients on the same host send `BLOCKRUN_PROXY_TOKEN` (if you set one) and never see your API key or wallet key — the sidecar strips the client's `Authorization` header before forwarding and substitutes its own.
 
 #### High-concurrency tuning
 
@@ -374,10 +475,10 @@ curl http://localhost:4001/v1/chat/completions \
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions. `stream=True` returns `text/event-stream`; otherwise JSON. |
-| `POST` | `/v1beta/models/{model}:generateContent` | Native Gemini JSON request and response, with automatic x402 payment. |
-| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Native Gemini SSE, with automatic x402 payment. |
+| `POST` | `/v1beta/models/{model}:generateContent` | Native Gemini JSON request and response, with automatic x402 payment. **Wallet rail only** — 501 on the API-key rail. |
+| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Native Gemini SSE, with automatic x402 payment. **Wallet rail only** — 501 on the API-key rail. |
 | `POST` | `/v1/responses` | OpenAI Responses API, bridged onto Chat Completions (`input`→`messages`, `output`/`response.*` SSE out). Text-in/text-out; for advanced tool/state flows use `/v1/chat/completions`. |
-| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`, and `quality` (Solana only — see below). |
+| `POST` | `/v1/images/generations` | OpenAI Image Generations. Accepts `prompt`, `model`, `size`, `n`, and `quality` (Solana or API key — see below). |
 | `POST` | `/v1/images/edits` | OpenAI-compatible image editing. Accepts JSON data URIs or multipart `image`/`image[]`; supports multiple source images, `mask`, and `quality` (Solana only). `/v1/images/image2image` is an alias. |
 | `POST` | `/v1/videos` | OpenAI Videos API create (what LiteLLM's video routes call) — returns a job object immediately |
 | `GET`  | `/v1/videos/{id}` | OpenAI Videos API status poll (`queued` → `in_progress` → `completed`/`failed`) |
@@ -391,6 +492,12 @@ curl http://localhost:4001/v1/chat/completions \
 | `GET`  | `/docs` | Auto-generated Swagger UI |
 
 ### 2e. Native Gemini protocol
+
+> **Wallet rail only.** `api.blockrun.ai` does not publish `/v1beta`, so with
+> `BLOCKRUN_API_KEY` set the sidecar answers 501 with that explanation instead
+> of a bare 404. Gemini *models* still work on the API-key rail through
+> `/v1/chat/completions` with `model="google/gemini-3-pro"`; only Google's own
+> protocol needs a wallet.
 
 Native Gemini calls use the sidecar root (`http://localhost:4001`), not the
 OpenAI `/v1` base. The sidecar preserves Gemini request/response JSON and SSE
@@ -590,8 +697,19 @@ Opt-in JSONL logger captures every call — works on both Base and Solana, sync 
 ```
 ts, iso, model, provider, messages, completion,
 usage{prompt_tokens, completion_tokens, total_tokens},
-latency_ms, stream, cost_usd, status, error_type, error_message, request_id
+latency_ms, stream, cost_usd, cost_source, estimated_cost_usd, settlement,
+status, error_type, error_message, request_id
 ```
+
+`cost_source` says how much to trust `cost_usd`:
+
+| `cost_source` | Meaning |
+|---|---|
+| `blockrun_x402` | `cost_usd` **is** the settled on-chain charge for this call. Wallet rail. |
+| `blockrun_account` | Billed to prepaid account credit — no per-call on-chain charge exists. `cost_usd` here is LiteLLM's token × list-price estimate (`null` when LiteLLM has no price for the model); the **authoritative figure is the ledger at [user.blockrun.ai](https://user.blockrun.ai) → Activity**. |
+| `litellm_estimate` | Wallet rail, but no charge was reported (free/cached call, or an older SDK). The estimate is standing in. |
+
+The distinction between the last two matters for reconciliation: `blockrun_account` means "a real number exists, elsewhere", not "we tried to read one and failed".
 
 ### Mode 1 — one line
 
@@ -620,8 +738,11 @@ litellm_settings:
 
 | File / env var | What | Configurable? |
 |---|---|---|
-| `BLOCKRUN_WALLET_KEY` (env) | Base private key | yes |
+| `BLOCKRUN_API_KEY` (env) | BlockRun account key (`brk_live_…`) — issued at [user.blockrun.ai](https://user.blockrun.ai) | yes |
+| `BLOCKRUN_API_BASE_URL` (env) | Account API endpoint (default `https://api.blockrun.ai`) | yes |
+| `BLOCKRUN_CHAIN` (env) | Wallet-rail chain, `solana` (default) or `base` | yes |
 | `SOLANA_WALLET_KEY` (env) | Solana private key | yes |
+| `BLOCKRUN_WALLET_KEY` (env) | Base private key | yes |
 | `~/.blockrun/.session` | Auto-created Base wallet | — |
 | `~/.blockrun/.solana-session` | Auto-created Solana wallet | — |
 | `~/.blockrun/litellm_calls.jsonl` | LiteLLM request log | `BLOCKRUN_LITELLM_LOG` env or `enable_local_logging(path)` |
@@ -645,26 +766,48 @@ The `examples/` directory has copy-paste-ready snippets:
 
 ## How it works (under the hood)
 
+One adapter, two rails. The rail is chosen by which credential is present; nothing above that point differs.
+
+**API-key rail** — a plain authenticated request:
+
+```
+┌─────────────────┐    OpenAI dict     ┌──────────────────────┐   Authorization: Bearer brk_…  ┌──────────────────┐
+│ Your app /      │ ─────────────────▶ │  blockrun-litellm    │ ─────────────────────────────▶ │ api.blockrun.ai  │
+│ LiteLLM /       │                    │  (provider OR proxy) │ ◀──── 200 + chat response ──── │  (your account)  │
+│ OpenAI SDK      │                    └──────────────────────┘                                └────────┬─────────┘
+└─────────────────┘                                                                                    │ debits
+                                                                                                       │ prepaid
+                                                                                                       ▼ credit
+                                                                                              user.blockrun.ai
+```
+
+1. Caller sends an OpenAI Chat Completions dict.
+2. `blockrun-litellm` whitelists the params and POSTs them with your key.
+3. The account API meters real upstream token usage against the published price sheet and debits your credit.
+4. Spend lands in the account ledger; the response comes back verbatim.
+
+**Wallet rail** — x402, no account:
+
 ```
 ┌─────────────────┐    OpenAI dict     ┌──────────────────────┐    POST /v1/chat/completions  ┌────────────────┐
-│ Your app /      │ ─────────────────▶ │  blockrun-litellm    │ ────────────────────────────▶ │  blockrun.ai   │
-│ LiteLLM /       │                    │  (provider OR proxy) │ ◀──── 402 + payment-required ─│  gateway       │
-│ OpenAI SDK      │                    │  ↓                   │                               │                │
-└─────────────────┘                    │  blockrun-llm SDK    │ ───── EIP-712 signed retry ──▶│                │
+│ Your app /      │ ─────────────────▶ │  blockrun-litellm    │ ────────────────────────────▶ │ sol.blockrun.ai│
+│ LiteLLM /       │                    │  (provider OR proxy) │ ◀──── 402 + payment-required ─│  (or blockrun. │
+│ OpenAI SDK      │                    │  ↓                   │                               │   ai for Base) │
+└─────────────────┘                    │  blockrun-llm SDK    │ ───── signed retry ─────────▶ │                │
                                        │  (local signing)     │ ◀──── 200 + chat response ────│                │
                                        └──────────────────────┘                               └────────────────┘
                                                 ▲
                                                 │ private key (stays local, signs only)
                                        ┌──────────────────────┐
-                                       │ BLOCKRUN_WALLET_KEY  │
+                                       │ SOLANA_WALLET_KEY    │
                                        │   or ~/.blockrun/    │
                                        └──────────────────────┘
 ```
 
 1. Caller sends an OpenAI Chat Completions dict.
 2. `blockrun-litellm` whitelists the params and dispatches through `blockrun-llm`.
-3. `blockrun-llm` posts to BlockRun, receives a 402 with payment requirements, signs an EIP-712 payment locally with your wallet, and retries.
-4. BlockRun verifies the signature on-chain, settles the USDC micropayment, runs the inference, and returns the response.
+3. `blockrun-llm` posts to BlockRun, receives a 402 with payment requirements, signs the payment locally with your wallet (SVM on Solana, EIP-712 on Base), and retries.
+4. BlockRun verifies the signature on-chain, settles the USDC micropayment, runs the inference, and returns the response — plus the exact charge, which the adapter surfaces as `cost_usd`.
 5. `blockrun-litellm` returns the dumped pydantic model as a plain OpenAI dict (or `litellm.ModelResponse` in provider mode).
 
 ---
@@ -674,14 +817,23 @@ The `examples/` directory has copy-paste-ready snippets:
 **Q: Does this support streaming?**
 Yes, as of v0.2.0. Pass `stream=True` and the adapter routes through `blockrun-llm`'s `chat_completion_stream()` (SDK ≥ 0.20.0). The 402 → sign-locally → retry-with-PAYMENT-SIGNATURE dance happens before the first chunk; once the upstream switches to `text/event-stream`, chunks are forwarded straight through (provider mode → `litellm.GenericStreamingChunk`, proxy mode → OpenAI-style `data: <json>\n\n` SSE). Caveats inherited from the gateway: `search_parameters` and the Responses-API models (`codex`, `gpt-5.4-pro`) reject streaming server-side with 400.
 
-**Q: Where does my private key live?**
-On your machine only — `BLOCKRUN_WALLET_KEY` env var, or `~/.blockrun/.session` if you used `setup_agent_wallet()`. The proxy and provider both read from those sources via `blockrun-llm`. Only EIP-712 signatures are transmitted.
+**Q: Do I need a crypto wallet to use this?**
+No. Sign in at [user.blockrun.ai](https://user.blockrun.ai), top up by card, and set `BLOCKRUN_API_KEY`. The wallet rail stays available for anyone who prefers to pay in USDC directly — including agents, which can hold a wallet but cannot fill in a card form.
 
-**Q: How do I switch between Base and Solana?**
-Today this adapter wires to BlockRun's Base gateway (USDC on Base). Solana support tracks the `blockrun-llm` `SolanaLLMClient` and will be added in a follow-up release.
+**Q: I already use this with a wallet. Does the API key change anything for me?**
+No. The wallet rail is untouched; the account rail only activates when a `brk_`-prefixed key is present. The one behaviour change in 0.10.0 is the default chain — see the next question.
+
+**Q: How do I switch between Solana and Base?**
+`BLOCKRUN_CHAIN=solana` (the default since 0.10.0) or `BLOCKRUN_CHAIN=base`; `--chain` on the sidecar; or point `BLOCKRUN_API_URL` / `api_base=` at a gateway directly, which wins over both. A host that holds only a Base wallet and sets nothing keeps using Base, with a warning.
+
+**Q: Where does my private key live?**
+On your machine only — `SOLANA_WALLET_KEY` / `BLOCKRUN_WALLET_KEY` env vars, or `~/.blockrun/.solana-session` / `~/.blockrun/.session` if you used `setup_agent_wallet()`. The proxy and provider both read from those sources via `blockrun-llm`. Only signatures are transmitted. On the API-key rail there is no private key at all.
+
+**Q: Why is `cost_usd` empty when I use an API key?**
+Because there is no per-call on-chain charge to report — the call was billed against prepaid credit. The audit row says so with `cost_source: "blockrun_account"`, and the authoritative spend is at [user.blockrun.ai](https://user.blockrun.ai) → Activity. The wallet rail still reports the exact settled charge per call.
 
 **Q: Can I run the proxy in Docker / k8s?**
-Yes — it's a vanilla FastAPI app. Pass the wallet key via secret (env var), bind to `0.0.0.0` only inside a private network, and set `BLOCKRUN_PROXY_TOKEN` for an additional auth layer.
+Yes — it's a vanilla FastAPI app. Pass `BLOCKRUN_API_KEY` (or the wallet key) via secret, bind to `0.0.0.0` only inside a private network, and set `BLOCKRUN_PROXY_TOKEN` for an additional auth layer. The sidecar never forwards a client's `Authorization` header upstream.
 
 **Q: Is this affiliated with LiteLLM (BerriAI)?**
 No — this is an independent adapter built by the BlockRun team. LiteLLM is a great project; we're just plugging into its custom-provider hooks.
@@ -707,9 +859,42 @@ MIT. See [LICENSE](LICENSE).
 
 # 中文文档
 
-[BlockRun](https://blockrun.ai) 的 [LiteLLM](https://github.com/BerriAI/litellm) 适配层 —— 用 LiteLLM 调用 BlockRun 上的 AI 模型，**完全零改动**。
+[BlockRun](https://blockrun.ai) 的 [LiteLLM](https://github.com/BerriAI/litellm) 适配层 —— 用 LiteLLM 调用 BlockRun 上 90+ 个 AI 模型，**完全零改动**。可以用 **BlockRun API Key**（信用卡充值，不需要钱包），也可以用 **x402 USDC 钱包**（**Solana** 或 Base）。
 
-> **一句话：** BlockRun 的 `/v1/chat/completions` 协议层就是 OpenAI 兼容的，唯一区别是认证方式 —— BlockRun 用 x402 钱包签名（按次 USDC 微支付，非托管），不是 Bearer API Key。这个包就是把这层差异填平。
+> **一句话：** BlockRun 的 `/v1/chat/completions` 协议层就是 OpenAI 兼容的，区别只在*怎么付钱*。两条路：一条是普通 API Key，从预付余额扣；一条是按次 x402 钱包签名（非托管 USDC，Solana / Base）。这个包两条都支持，凭证之上的一切完全一致。
+
+## 领 API Key（30 秒）
+
+1. 用 Google 账号登录 **[user.blockrun.ai](https://user.blockrun.ai)**。
+2. **Billing → Add credit**：信用卡充值，最低 $5。手续费（5.5% + $0.30）在**充值时**一次性收取，之后每个模型都按官网标价计费 —— 没有每次调用的最低消费，没有每次调用的手续费，没有加价。
+3. **API keys → Create key**：拿到 `brk_live_…`，只显示一次。
+
+```bash
+export BLOCKRUN_API_KEY=brk_live_...
+```
+
+到此配置就结束了。不需要钱包、不需要链、不需要 USDC、不需要 gas。
+
+想用自己的钱包付？看下面[**用 x402 钱包付费**](#用-x402-钱包付费solana--base) —— 那条路完全不需要注册账号。
+
+## 两种付费方式
+
+|  | **API Key** | **x402 钱包** |
+|---|---|---|
+| 怎么开通 | 登录 [user.blockrun.ai](https://user.blockrun.ai) 刷卡充值 | 给钱包充 USDC |
+| 凭证 | `BLOCKRUN_API_KEY=brk_live_…` | `SOLANA_WALLET_KEY` / `BLOCKRUN_WALLET_KEY` |
+| 端点 | `https://api.blockrun.ai` | `https://sol.blockrun.ai/api`（默认）或 `https://blockrun.ai/api` |
+| 计费 | 预付余额，按标价扣 | 每次调用链上结算 USDC |
+| 要不要账号 | 要 | **不要** |
+| 链 | 没有链 | Solana 或 Base |
+| 单次成本上报 | 没有 —— 查 [user.blockrun.ai](https://user.blockrun.ai) 账单 | **有** —— 每次调用返回真实结算金额 |
+| 消费在哪看 | Dashboard → Activity | 链上，以及 `x-blockrun-settlement` |
+| 原生 Gemini (`/v1beta`) | 不支持 | 支持 |
+| 需要装的 extra | 无 | Solana 签名需要 `[solana]` |
+
+其余完全相同：同一份模型目录、同样的 OpenAI / Anthropic 协议、同样的流式、同样的原生指纹透传。
+
+**优先级：** 只要检测到 API Key 就走 Key 这条路。`BLOCKRUN_API_KEY`（或 `--api-key`，或调用时传 `api_key="brk_live_…"`）选账号路；没有 Key 就回落到钱包路。钱包私钥不会被误判成 API Key —— 只有 `brk_` 前缀才会切到账号路，而任何私钥格式都不以它开头。
 
 ## 两种对接方式
 
@@ -718,33 +903,88 @@ MIT. See [LICENSE](LICENSE).
 | **1. 自定义 Provider**（进程内） | 用 LiteLLM **Python 库**的应用 | `litellm.completion(model="blockrun/openai/gpt-5.5", ...)` |
 | **2. 本地代理**（sidecar） | 用 LiteLLM **Proxy Server** 的、或任何 OpenAI 客户端 | `api_base="http://localhost:4001/v1"` |
 
-底层都走 [`blockrun-llm`](https://github.com/BlockRunAI/blockrun-llm) SDK 做签名和 x402 支付，两种模式行为一致。按你的部署方式选一种就行。
+两种模式在两条付费路上都能用，行为一致。按你的部署方式选一种就行。
 
 ## 快速上手
 
 ### 安装
 
 ```bash
-# 只装自定义 provider
+# API Key，或在 Python 库里用 Solana / Base 钱包
 pip install blockrun-litellm
 
-# 同时装本地代理（带 FastAPI/uvicorn）
+# 再加本地代理（FastAPI/uvicorn）
 pip install 'blockrun-litellm[proxy]'
+
+# 再加 x402 SVM 签名器 —— 只有用 Solana 钱包付费才需要
+pip install 'blockrun-litellm[proxy,solana]'
 ```
+
+用 API Key 的话不需要 `solana` extra —— 那条路没有签名这一步。
+
+### 用 API Key（推荐先试这个）
+
+```python
+import litellm
+from blockrun_litellm import register
+
+register()
+
+# 从环境变量读 BLOCKRUN_API_KEY；也可以每次调用传 api_key=
+r = litellm.completion(
+    model="blockrun/openai/gpt-5.5",
+    messages=[{"role": "user", "content": "你好"}],
+    max_tokens=64,
+)
+print(r.choices[0].message.content)
+```
+
+sidecar 版：
+
+```bash
+blockrun-litellm-proxy --port 4001 --api-key brk_live_...
+```
+
+## 用 x402 钱包付费（Solana / Base）
+
+不用注册、不用账号：给钱包充 USDC，每次请求自己结算。这是给 Agent 用的那条路 —— Agent 可以持有钱包，但填不了信用卡表单。
+
+| 链 | 网关 URL | 钱包环境变量 | 说明 |
+|---|---|---|---|
+| **Solana (USDC)** —— *默认* | `https://sol.blockrun.ai/api` | `SOLANA_WALLET_KEY` | 亚秒级结算、费用最低。需要 `[solana]` extra。同步 / 异步 / 流式都支持。 |
+| Base (USDC) | `https://blockrun.ai/api` | `BLOCKRUN_WALLET_KEY` | 同步 / 异步 / 流式都支持。 |
+
+**从 0.10.0 起 Solana 是默认链**（之前没配置时默认走 Base）。显式指定：
+
+```bash
+export BLOCKRUN_CHAIN=solana   # 默认
+export BLOCKRUN_CHAIN=base
+```
+
+也可以直接用 `BLOCKRUN_API_URL` / `--api-url` / `api_base=` 指到具体网关（优先级高于 `BLOCKRUN_CHAIN`）。
+
+> **从 ≤ 0.9.x 升级、原来用 Base 的？** 不会坏。没有配置链、且机器上只有 Base 钱包时，适配器仍然走 Base，并打一行警告。设 `BLOCKRUN_CHAIN=base` 把选择写死，警告就没了。
 
 ### 配钱包（一次性）
 
 ```bash
 # 方式 A — 环境变量（服务端推荐）
-export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_CHAIN_PRIVATE_KEY
+export SOLANA_WALLET_KEY=YOUR_SOLANA_PRIVATE_KEY      # Solana（默认链）
+export BLOCKRUN_WALLET_KEY=0xYOUR_BASE_PRIVATE_KEY    # Base
 
 # 方式 B — 自动创建并扫码充值（交互式）
 python -c "from blockrun_llm import setup_agent_wallet; setup_agent_wallet()"
 ```
 
-私钥**只在本地用于 EIP-712 签名**，永远不会离开你的机器。
+私钥**只在本地签名**，永远不会离开你的机器。
 
 > 💡 想零成本试一遍？用免费模型 `nvidia/deepseek-v4-flash` —— 代码完全一样，钱包流程一样，结算 $0。
+
+### 两条路各自支持哪些接口
+
+除下面注明的一条外，所有接口两条路都支持：`/v1/chat/completions`（含流式）、`/v1/messages`（Anthropic 原生）、`/v1/responses`、`/v1/images/*`、`/v1/videos*`、`/v1/audio/*`、`/v1/models`。
+
+唯一的缺口是**原生 Gemini 协议** `/v1beta/models/{model}:generateContent` —— `api.blockrun.ai` 没有发布这个接口，用 API Key 时 sidecar 返回 501 并说明原因。Gemini **模型本身**两条路都能用，走 `/v1/chat/completions` 传 `model="google/gemini-3-pro"` 即可；只有 Google 自家协议需要钱包。
 
 ### 模式 1：自定义 Provider
 
@@ -767,8 +1007,9 @@ print(response.choices[0].message.content)
 ### 模式 2：本地代理
 
 ```bash
-# 1) 启动 sidecar
-export BLOCKRUN_WALLET_KEY=0xYOUR_KEY
+# 1) 启动 sidecar —— 二选一
+blockrun-litellm-proxy --port 4001 --api-key brk_live_...   # API Key
+export SOLANA_WALLET_KEY=YOUR_SOLANA_PRIVATE_KEY            # 或 x402 钱包（默认 Solana）
 blockrun-litellm-proxy --port 4001
 
 # 2) LiteLLM Proxy 配置 (config.yaml)
@@ -862,11 +1103,23 @@ BlockRun 额外参数：
 **Q：支持流式吗？**
 v0.2.0 起完全支持。`stream=True` 时适配层走 `blockrun-llm` 的 `chat_completion_stream()`（SDK ≥ 0.20.0），402 → 本地签名 → 带 PAYMENT-SIGNATURE 重试这条链在第一个 chunk 之前完成；上游切到 `text/event-stream` 后 chunks 直接透传（Provider 模式 → `litellm.GenericStreamingChunk`，Proxy 模式 → OpenAI 标准 `data: <json>\n\n`）。后端继承的限制：`search_parameters` 和 Responses-API 模型（`codex`、`gpt-5.4-pro`）在服务端就拒绝流式（400）。
 
+**Q：一定要有加密钱包吗？**
+不用。去 [user.blockrun.ai](https://user.blockrun.ai) 登录、刷卡充值、设 `BLOCKRUN_API_KEY` 就行。钱包那条路继续保留，给愿意直接用 USDC 付费的人 —— 尤其是 Agent，它能持有钱包，但填不了信用卡表单。
+
+**Q：我已经在用钱包，加了 API Key 会影响我吗？**
+不会。钱包那条路一行没动，只有出现 `brk_` 前缀的凭证时才会切到账号路。0.10.0 唯一的行为变化是默认链，见下一条。
+
+**Q：怎么在 Solana 和 Base 之间切？**
+`BLOCKRUN_CHAIN=solana`（0.10.0 起是默认）或 `BLOCKRUN_CHAIN=base`；sidecar 用 `--chain`；也可以直接把 `BLOCKRUN_API_URL` / `api_base=` 指到具体网关（优先级最高）。机器上只有 Base 钱包又什么都没配的，仍然走 Base，并打一行警告。
+
 **Q：私钥放哪？**
-只在本地 —— `BLOCKRUN_WALLET_KEY` 环境变量，或 `setup_agent_wallet()` 创建的 `~/.blockrun/.session`。Provider 和 Proxy 都通过 `blockrun-llm` 读取。链上只看到签名，看不到私钥。
+只在本地 —— `SOLANA_WALLET_KEY` / `BLOCKRUN_WALLET_KEY` 环境变量，或 `setup_agent_wallet()` 创建的 `~/.blockrun/.solana-session` / `~/.blockrun/.session`。Provider 和 Proxy 都通过 `blockrun-llm` 读取。链上只看到签名，看不到私钥。用 API Key 时根本不存在私钥。
+
+**Q：用 API Key 时 `cost_usd` 为什么是空的？**
+因为这条路没有"单次链上扣款"这回事 —— 这次调用是从预付余额扣的。审计行会写明 `cost_source: "blockrun_account"`，权威金额在 [user.blockrun.ai](https://user.blockrun.ai) → Activity。钱包那条路仍然每次返回真实结算金额。
 
 **Q：Docker / k8s 部署？**
-代理是普通的 FastAPI 应用。密钥用 secret 注入，对外只暴露内网，可选 `BLOCKRUN_PROXY_TOKEN` 加一层 Bearer 鉴权。
+代理是普通的 FastAPI 应用。`BLOCKRUN_API_KEY`（或钱包私钥）用 secret 注入，对外只暴露内网，可选 `BLOCKRUN_PROXY_TOKEN` 加一层 Bearer 鉴权。sidecar 不会把客户端的 `Authorization` 头转发到上游。
 
 **Q：和 BerriAI 是什么关系？**
 没关系。这是 BlockRun 团队独立维护的适配层，挂在 LiteLLM 的 custom provider 接口上。

@@ -53,8 +53,9 @@ class _FakeClient:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # _resolve_api_url() reads BLOCKRUN_API_URL first; a developer or CI job with
-    # it exported (the documented Solana workflow) would otherwise flip the
-    # absolute-URL assertions below. Pin the Base default for these tests.
+    # it exported would otherwise flip the absolute-URL assertions below. The
+    # conftest already clears the credential env and pins the chain probe, so
+    # dropping this one leaves the documented default (Solana).
     monkeypatch.delenv("BLOCKRUN_API_URL", raising=False)
     return TestClient(proxy.app)
 
@@ -105,8 +106,11 @@ def test_generate_content_is_verbatim_and_drops_google_credentials(
     assert fake.posts == 1 and fake.stream_sends == 0
     assert count_semaphore["acquired"] == 1
     forwarded = fake.requests[0]
+    # sol.blockrun.ai, not blockrun.ai: nothing here configures a chain, and the
+    # unconfigured default is Solana as of 0.10.0. The native Gemini surface is
+    # published on both gateways, so the flip changes the host and nothing else.
     assert str(forwarded.url) == (
-        "https://blockrun.ai/api/v1beta/models/gemini-2.5-flash:generateContent"
+        "https://sol.blockrun.ai/api/v1beta/models/gemini-2.5-flash:generateContent"
     )
     assert forwarded.content == raw
     assert "x-goog-api-key" not in forwarded.headers
@@ -140,7 +144,7 @@ def test_stream_generate_content_uses_url_method_and_preserves_sse(
     assert fake.stream_sends == 1 and fake.posts == 0
     assert count_semaphore["acquired"] == 1
     assert str(fake.requests[0].url) == (
-        "https://blockrun.ai/api/v1beta/models/"
+        "https://sol.blockrun.ai/api/v1beta/models/"
         "gemini-2.5-flash:streamGenerateContent"
     )
 
