@@ -204,16 +204,19 @@ print(response.choices[0].message.content)
 print(response.usage)  # prompt_tokens / completion_tokens / total_tokens
 ```
 
-The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-5.6-terra`, `anthropic/claude-opus-5`, `google/gemini-3.1-pro`, etc. all work — anything in BlockRun's catalog.
+The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so `openai/gpt-6-sol`, `anthropic/claude-opus-5.5`, `xai/grok-4.7`, `google/gemini-3.1-pro`, etc. all work — anything in BlockRun's catalog.
 
-For local allowlists and model pickers, the package includes the current 82-model
-catalog snapshot (chat, image, video, music, speech, and sound effects):
+For local allowlists and model pickers, the package includes a snapshot of the
+gateway catalog (chat, image, video, music, speech, and sound effects), dated by
+`CATALOG_SNAPSHOT_DATE`. The 2026-10-02 snapshot adds GPT-6 Astra / Sol / Luna,
+GPT-5.1, Claude Fable 5.1, Claude Opus 5.5, Claude Sonnet 5.5, Grok 4.6 and
+Grok 4.7:
 
 ```python
 from blockrun_litellm import model_ids, is_known_model
 
-assert "anthropic/claude-opus-5" in model_ids()
-assert is_known_model("blockrun/anthropic/claude-opus-5")
+assert "anthropic/claude-opus-5.5" in model_ids()
+assert is_known_model("blockrun/openai/gpt-6-sol")
 ```
 
 The gateway is authoritative and accepts newly released IDs before a package
