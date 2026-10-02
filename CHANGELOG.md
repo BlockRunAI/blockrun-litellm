@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Catalog snapshot refreshed to 2026-10-02.** `model_ids()` /
+  `is_known_model()` now know GPT-6 Astra / Sol / Luna, GPT-5.1, Claude
+  Fable 5.1, Claude Opus 5.5, Claude Sonnet 5.5, Grok 4.6 and Grok 4.7, plus the
+  other ids the gateway added since 2026-07-24. Ids it no longer lists
+  (`openai/gpt-5.3` and seven `nvidia/*` free models) are dropped.
+  `openjev` is left out: it is a judgment endpoint, not a `provider/model` id.
+  Forwarding is unaffected either way — the gateway stays authoritative.
+
 ## 0.10.0 — 2026-09-05
 
 ### Added
