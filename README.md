@@ -208,7 +208,8 @@ The `blockrun/` prefix is stripped before being sent to the BlockRun gateway, so
 
 For local allowlists and model pickers, the package includes a snapshot of the
 gateway catalog (chat, image, video, music, speech, and sound effects), dated by
-`CATALOG_SNAPSHOT_DATE`. The 2026-10-19 snapshot adds GPT-6.1 Sol, Mistral
+`CATALOG_SNAPSHOT_DATE`. The 2026-10-20 snapshot adds DeepSeek V4.1 Flash
+(`deepseek/deepseek-v4.1-flash`); the 2026-10-19 one added GPT-6.1 Sol, Mistral
 Large 4, Qwen3.8 Max, Tencent HY4 Preview, Poolside Laguna S 2.1 and NVIDIA Muse
 Glimmer 30B to the GPT-6, Claude Opus / Sonnet 5.5, Fable 5.1 and Grok 4.6 / 4.7
 ids added on 2026-10-02:

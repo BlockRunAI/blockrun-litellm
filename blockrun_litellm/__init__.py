@@ -48,4 +48,4 @@ __all__ = [
     "model_ids",
     "register",
 ]
-__version__ = "0.10.0"
+__version__ = "0.10.1"

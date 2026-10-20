@@ -16,7 +16,7 @@ from typing import Tuple
 # the gateway's own catalog order. Refresh both together. Only ``provider/model``
 # ids are kept: the catalog has at times also listed ``openjev``, a judgment
 # endpoint rather than a model you can pass to completion().
-CATALOG_SNAPSHOT_DATE = "2026-10-19"
+CATALOG_SNAPSHOT_DATE = "2026-10-20"
 
 BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "openai/gpt-6-astra",
@@ -74,6 +74,7 @@ BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "google/gemini-2.5-flash-lite",
     "deepseek/deepseek-v4-flash-vision-exp",
     "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4.1-flash",
     "deepseek/deepseek-chat",
     "deepseek/deepseek-reasoner",
     "moonshot/kimi-k3",
