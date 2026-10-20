@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.2 — 2026-10-20
+
+### Fixed
+
+- **Streamed calls record the real x402 charge on current LiteLLM.** From
+  about LiteLLM 1.104, `stream_chunk_builder` takes the assembled response's
+  `_hidden_params` from the last chunk, which is a finish chunk the stream
+  wrapper builds itself. The real charge riding on our chunks never reached
+  it, so `response_cost` (spend, `max_budget`) fell back to a token ×
+  list-price estimate, and the JSONL audit lost `cost_source=blockrun_x402`.
+  The usage frame now also states the charge as `usage.cost`, which newer
+  LiteLLM turns into `response_cost`. The audit logger reads the charge from
+  the propagated `provider_specific_fields` when the top-level
+  `blockrun_cost_usd` is missing. Older LiteLLM keeps using the existing
+  response-cost header. Tested on LiteLLM 1.70, 1.80, 1.100 and 1.106.
+- **Reasoning- and cached-token details survive streaming again.**
+  blockrun-llm 1.19.0 declared `prompt_tokens_details` /
+  `completion_tokens_details` as fields on `ChatUsage`, so they were no longer
+  in `model_extra`, where the provider looked for them. Streamed usage dropped
+  `reasoning_tokens` and `cached_tokens`. Both are now read from the field or
+  the extra, whichever the installed SDK uses.
+
 ## 0.10.1 — 2026-10-20
 
 ### Changed
