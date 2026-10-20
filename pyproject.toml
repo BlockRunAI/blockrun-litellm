@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blockrun-litellm"
-version = "0.10.2"
+version = "0.10.3"
 description = "LiteLLM adapter for BlockRun — call 90+ AI models via LiteLLM with a BlockRun API key or an x402 USDC wallet (Solana or Base)"
 readme = "README.md"
 license = "MIT"

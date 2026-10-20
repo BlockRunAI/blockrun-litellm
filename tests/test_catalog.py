@@ -9,7 +9,7 @@ from blockrun_litellm.catalog import (
 
 
 def test_model_catalog_matches_live_snapshot() -> None:
-    assert len(BLOCKRUN_MODEL_IDS) == 116
+    assert len(BLOCKRUN_MODEL_IDS) == 117
     assert len(set(BLOCKRUN_MODEL_IDS)) == len(BLOCKRUN_MODEL_IDS)
     assert all(mid.count("/") == 1 and mid.strip() == mid for mid in BLOCKRUN_MODEL_IDS)
     assert "anthropic/claude-opus-5" in BLOCKRUN_MODEL_IDS
