@@ -9,7 +9,7 @@ from blockrun_litellm.catalog import (
 
 
 def test_model_catalog_matches_live_snapshot() -> None:
-    assert len(BLOCKRUN_MODEL_IDS) == 109
+    assert len(BLOCKRUN_MODEL_IDS) == 115
     assert len(set(BLOCKRUN_MODEL_IDS)) == len(BLOCKRUN_MODEL_IDS)
     assert all(mid.count("/") == 1 and mid.strip() == mid for mid in BLOCKRUN_MODEL_IDS)
     assert "anthropic/claude-opus-5" in BLOCKRUN_MODEL_IDS
@@ -28,6 +28,19 @@ def test_catalog_carries_the_2026_10_chat_models() -> None:
         "anthropic/claude-sonnet-5.5",
         "xai/grok-4.6",
         "xai/grok-4.7",
+    ):
+        assert is_known_model(mid), mid
+        assert is_known_model(f"blockrun/{mid}"), mid
+
+
+def test_catalog_carries_the_2026_10_19_additions() -> None:
+    for mid in (
+        "openai/gpt-6.1-sol",
+        "mistral/mistral-large-4",
+        "qwen/qwen3.8-max",
+        "tencent/hy4-preview",
+        "poolside/laguna-s-2.1",
+        "nvidia/muse-glimmer-30b",
     ):
         assert is_known_model(mid), mid
         assert is_known_model(f"blockrun/{mid}"), mid
