@@ -218,6 +218,13 @@ def _cost_hidden_params(cost_usd: float) -> Dict[str, Any]:
         "response_cost": cost,
         "blockrun_cost_usd": cost,
         "additional_headers": {_COST_HEADER: cost},
+        # LiteLLM >= ~1.104 takes the assembled response's ``_hidden_params``
+        # from the LAST chunk, which is a finish chunk the wrapper synthesizes
+        # itself, so the keys above never reach it. ``stream_chunk_builder``
+        # does still copy the newest chunk-level ``provider_specific_fields``
+        # onto the assembled ``_hidden_params``; the audit logger reads the
+        # charge from there when ``blockrun_cost_usd`` is missing.
+        "provider_specific_fields": {"blockrun_cost_usd": cost},
     }
 
 
@@ -236,6 +243,15 @@ def _inject_real_cost(gchunk: Dict[str, Any], cost_usd: float) -> None:
         **psf,
         "_hidden_params": _cost_hidden_params(cost_usd),
     }
+    # The usage frame also states the charge as ``usage.cost``: LiteLLM's
+    # stream builder sums it onto the assembled ``usage.cost`` and, for a
+    # provider whose reported cost is not re-priced, uses it as
+    # ``response_cost`` (``_set_stream_builder_response_cost``). That is the
+    # channel newer LiteLLM reads, since the hidden-params one above is
+    # overwritten by its own synthesized finish chunk.
+    usage = gchunk.get("usage")
+    if isinstance(usage, dict):
+        usage["cost"] = float(cost_usd)
 
 
 def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
@@ -256,12 +272,11 @@ def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
     # leaking a stray ``cost_usd`` field into ``provider_specific_fields``.
     extras.pop("cost_usd", None)
     if chunk.usage is not None:
-        # NB: ``prompt_tokens_details`` / ``completion_tokens_details`` are NOT
-        # declared fields on ChatUsage — they are pydantic extras (``extra =
-        # "allow"``), so they already live in ``model_extra`` and are picked up
-        # by the dict() copy below. Never read them by attribute: access to an
-        # absent pydantic extra raises AttributeError, it does not return None.
         usage_details: Dict[str, Any] = dict(chunk.usage.model_extra or {})
+        for key in _USAGE_DETAIL_KEYS:
+            value = _usage_detail(chunk.usage, key)
+            if value is not None:
+                usage_details[key] = value
         if chunk.usage.cache_read_input_tokens is not None:
             usage_details["cache_read_input_tokens"] = chunk.usage.cache_read_input_tokens
         if chunk.usage.cache_creation_input_tokens is not None:
@@ -271,13 +286,34 @@ def _native_extras(chunk: ChatCompletionChunk) -> Dict[str, Any]:
     return extras
 
 
+_USAGE_DETAIL_KEYS = ("prompt_tokens_details", "completion_tokens_details")
+
+
+def _usage_detail(usage: ChatUsage, key: str) -> Any:
+    """Read a token-detail block off ``ChatUsage`` whichever way the installed
+    SDK carries it.
+
+    blockrun-llm before #42 left ``prompt_tokens_details`` /
+    ``completion_tokens_details`` undeclared, so they arrive as pydantic extras
+    in ``model_extra``; from #42 on they are declared fields and ``model_extra``
+    no longer has them. Read the field only when it is declared: getattr on an
+    absent pydantic extra raises AttributeError rather than returning None.
+    """
+    extra = usage.model_extra or {}
+    if extra.get(key) is not None:
+        return extra[key]
+    if key in type(usage).model_fields:
+        return getattr(usage, key)
+    return None
+
+
 def _usage_dict(usage: ChatUsage) -> Dict[str, Any]:
     """Map a :class:`ChatUsage` → the plain usage dict LiteLLM's streaming
     handler feeds into ``litellm.Usage``.
 
     Carries the token-detail passthrough: ``prompt_tokens_details`` /
-    ``completion_tokens_details`` (pydantic extras — read from ``model_extra``,
-    see :func:`_native_extras`) and the Anthropic cache split. The gateway
+    ``completion_tokens_details`` (declared fields or pydantic extras depending on
+    the SDK version — see :func:`_usage_detail`) and the Anthropic cache split. The gateway
     folds cache reads INTO ``prompt_tokens`` (matching LiteLLM's own
     convention), so forwarding ``cache_read_input_tokens`` lets LiteLLM apply
     the cache-read discount instead of billing the full prompt rate.
@@ -292,10 +328,10 @@ def _usage_dict(usage: ChatUsage) -> Dict[str, Any]:
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
     }
-    extra = usage.model_extra or {}
-    for key in ("prompt_tokens_details", "completion_tokens_details"):
-        if extra.get(key) is not None:
-            out[key] = extra[key]
+    for key in _USAGE_DETAIL_KEYS:
+        value = _usage_detail(usage, key)
+        if value is not None:
+            out[key] = value
     if usage.cache_read_input_tokens is not None:
         out["cache_read_input_tokens"] = usage.cache_read_input_tokens
     if usage.cache_creation_input_tokens is not None:

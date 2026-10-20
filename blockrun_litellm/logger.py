@@ -171,9 +171,18 @@ def _extract_real_cost(response_obj: Any) -> Dict[str, Any]:
     try:
         hp = _hidden_params(response_obj) or {}
         rail = hp.get("blockrun_rail")
-        if hp.get("blockrun_cost_usd") is not None:
+        cost = hp.get("blockrun_cost_usd")
+        if cost is None:
+            # Streamed on newer LiteLLM: the top-level key is lost to the
+            # wrapper's synthesized finish chunk, but the chunk-level
+            # ``provider_specific_fields`` survive aggregation (see
+            # ``provider._cost_hidden_params``).
+            psf = hp.get("provider_specific_fields")
+            if isinstance(psf, dict):
+                cost = psf.get("blockrun_cost_usd")
+        if cost is not None:
             return {
-                "cost_usd": float(hp["blockrun_cost_usd"]),
+                "cost_usd": float(cost),
                 "settlement": hp.get("blockrun_settlement"),
                 "rail": rail,
             }

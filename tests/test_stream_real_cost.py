@@ -4,13 +4,16 @@ The real x402 charge must surface on **streamed** calls too, not just the
 non-streaming in-process path. The SDK (blockrun-llm) attaches the per-call
 charge to each stream chunk as ``chunk.cost_usd`` (race-free — it rides on the
 per-call chunk object, not the shared ``client._last_call_cost``). The provider
-threads that onto the *assembled* streamed response's ``_hidden_params`` so:
+threads that onto the *assembled* streamed response so:
 
-  (a) LiteLLM's streaming cost calc reads it from
-      ``additional_headers['llm_provider-x-litellm-response-cost']`` →
-      ``response_cost`` reflects the real wallet deduction, and
-  (b) the JSONL audit records it as ``blockrun_cost_usd`` /
-      ``cost_source='blockrun_x402'``.
+  (a) LiteLLM's ``response_cost`` (spend / ``max_budget``) is the real wallet
+      deduction. Older LiteLLM reads it from
+      ``additional_headers['llm_provider-x-litellm-response-cost']``; newer
+      LiteLLM (which takes the assembled hidden params from its own synthesized
+      finish chunk) reads the usage frame's ``usage.cost``. The tests assert
+      through ``Logging.response_cost_calculator``, the call the streaming
+      success path makes, so they hold on either.
+  (b) the JSONL audit records it with ``cost_source='blockrun_x402'``.
 
 These tests construct chunks carrying ``cost_usd`` (simulating the SDK) and run
 them through LiteLLM's real ``CustomStreamWrapper`` + ``stream_chunk_builder``,
@@ -20,6 +23,7 @@ fields and never recomputes a provider charge on its own.
 
 from __future__ import annotations
 
+import inspect
 import time
 from unittest.mock import MagicMock
 
@@ -91,9 +95,29 @@ def _stub_stream(monkeypatch, chunks) -> MagicMock:
     return mock
 
 
-def _assemble(monkeypatch, chunks):
+def _real_cost(hidden_params):
+    """The audit-facing charge on an assembled response: top-level
+    ``blockrun_cost_usd`` (older LiteLLM) or the copy inside the propagated
+    ``provider_specific_fields`` (newer LiteLLM)."""
+    if "blockrun_cost_usd" in hidden_params:
+        return hidden_params["blockrun_cost_usd"]
+    return (hidden_params.get("provider_specific_fields") or {}).get("blockrun_cost_usd")
+
+
+def _logged_cost(logging_obj, built):
+    """``response_cost`` as the streaming success path computes it. The method
+    is public (``response_cost_calculator``) on newer LiteLLM and private
+    (``_response_cost_calculator``) on older releases."""
+    calc = getattr(logging_obj, "response_cost_calculator", None) or getattr(
+        logging_obj, "_response_cost_calculator"
+    )
+    return calc(result=built)
+
+
+def _assemble(monkeypatch, chunks, *, with_logging=False):
     """Drive the provider's streaming() through LiteLLM's real
-    CustomStreamWrapper and return the aggregated ModelResponse."""
+    CustomStreamWrapper and return the aggregated ModelResponse (and the
+    ``Logging`` object, when ``with_logging``)."""
     from litellm.litellm_core_utils.litellm_logging import Logging
     from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
     from litellm.utils import custom_llm_setup
@@ -117,6 +141,15 @@ def _assemble(monkeypatch, chunks):
         start_time=time.time(),
         function_id="test-stream-cost",
     )
+    # What ``litellm.completion`` does before calling the provider; without it
+    # the Logging object has no litellm_params and cannot price the result.
+    logging_obj.update_environment_variables(
+        model=f"blockrun/{MODEL}",
+        user=None,
+        optional_params={},
+        litellm_params={"custom_llm_provider": "blockrun"},
+        custom_llm_provider="blockrun",
+    )
     wrapper = CustomStreamWrapper(
         completion_stream=gen,
         model=f"blockrun/{MODEL}",
@@ -124,7 +157,15 @@ def _assemble(monkeypatch, chunks):
         custom_llm_provider="blockrun",
     )
     list(wrapper)
-    return litellm.stream_chunk_builder(chunks=wrapper.chunks, messages=MESSAGES)
+    builder_kwargs = {}
+    if "logging_obj" in inspect.signature(litellm.stream_chunk_builder).parameters:
+        # Newer LiteLLM resolves the stream's response_cost inside the builder
+        # and needs the Logging object to do it; older releases do not take it.
+        builder_kwargs["logging_obj"] = logging_obj
+    built = litellm.stream_chunk_builder(
+        chunks=wrapper.chunks, messages=MESSAGES, **builder_kwargs
+    )
+    return (built, logging_obj) if with_logging else built
 
 
 def test_streaming_real_cost_survives_aggregation(monkeypatch) -> None:
@@ -133,35 +174,19 @@ def test_streaming_real_cost_survives_aggregation(monkeypatch) -> None:
     # Token usage still flows from the gateway's real counts.
     assert built.usage.prompt_tokens == 100
     assert built.usage.completion_tokens == 20
-    hp = built._hidden_params
     # (b) audit-facing field
-    assert hp["blockrun_cost_usd"] == pytest.approx(REAL_COST)
-    # (a) the channel LiteLLM's streaming cost calc actually reads
-    assert hp["additional_headers"][COST_HEADER] == pytest.approx(REAL_COST)
+    assert _real_cost(built._hidden_params) == pytest.approx(REAL_COST)
 
 
 def test_streaming_litellm_response_cost_uses_real_charge(monkeypatch) -> None:
-    # The streaming success path computes response_cost via
-    # ``response_cost_calculator`` (litellm_logging._response_cost_calculator),
-    # which short-circuits to the provider charge in
-    # ``_hidden_params['additional_headers'][_COST_HEADER]`` before any token
-    # price lookup. Asserting through that function proves the real wallet
-    # charge wins over a token×list-price estimate (and avoids depending on the
-    # model being in LiteLLM's price map).
-    from litellm.cost_calculator import response_cost_calculator
-
-    built = _assemble(monkeypatch, _raw_stream(cost_usd=REAL_COST))
-    cost = response_cost_calculator(
-        response_object=built,
-        model=MODEL,
-        cache_hit=False,
-        custom_llm_provider="blockrun",
-        base_model=None,
-        call_type="completion",
-        optional_params={},
-        custom_pricing=None,
+    # The streaming success path sets ``response_cost`` from
+    # ``Logging.response_cost_calculator(result=<assembled response>)``. It
+    # must return the real wallet charge, not a token x list-price estimate
+    # (and must not depend on the model being in LiteLLM's price map).
+    built, logging_obj = _assemble(
+        monkeypatch, _raw_stream(cost_usd=REAL_COST), with_logging=True
     )
-    assert cost == pytest.approx(REAL_COST)
+    assert _logged_cost(logging_obj, built) == pytest.approx(REAL_COST)
 
 
 def test_streaming_logger_records_real_cost_and_source(monkeypatch) -> None:
@@ -181,8 +206,9 @@ def test_streaming_logger_records_real_cost_and_source(monkeypatch) -> None:
 def test_streaming_free_call_records_zero_not_stale(monkeypatch) -> None:
     # Paid-path SDK attaches cost_usd=0.0 for free/cached calls; surface a
     # race-free zero, not a stale prior charge.
-    built = _assemble(monkeypatch, _raw_stream(cost_usd=0.0))
-    assert built._hidden_params["blockrun_cost_usd"] == 0.0
+    built, logging_obj = _assemble(monkeypatch, _raw_stream(cost_usd=0.0), with_logging=True)
+    assert _real_cost(built._hidden_params) == 0.0
+    assert _logged_cost(logging_obj, built) == 0.0
     entry = _build_entry(
         {"model": f"blockrun/{MODEL}", "stream": True, "messages": MESSAGES},
         built,
@@ -196,5 +222,6 @@ def test_streaming_free_call_records_zero_not_stale(monkeypatch) -> None:
 def test_streaming_without_sdk_cost_falls_back_to_estimate(monkeypatch) -> None:
     # Older SDK: no cost_usd on chunks -> no real cost, no clobbered hidden params.
     built = _assemble(monkeypatch, _raw_stream(cost_usd=None))
-    assert "blockrun_cost_usd" not in built._hidden_params
+    assert _real_cost(built._hidden_params) is None
+    assert getattr(built.usage, "cost", None) != REAL_COST
     assert COST_HEADER not in built._hidden_params.get("additional_headers", {})
