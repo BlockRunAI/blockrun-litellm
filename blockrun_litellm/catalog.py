@@ -14,12 +14,13 @@ from typing import Tuple
 
 # Snapshot taken from https://blockrun.ai/api/v1/models on the date below, in
 # the gateway's own catalog order. Refresh both together. Only ``provider/model``
-# ids are kept: the catalog also lists ``openjev``, a judgment endpoint rather
-# than a model you can pass to completion().
-CATALOG_SNAPSHOT_DATE = "2026-10-02"
+# ids are kept: the catalog has at times also listed ``openjev``, a judgment
+# endpoint rather than a model you can pass to completion().
+CATALOG_SNAPSHOT_DATE = "2026-10-19"
 
 BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "openai/gpt-6-astra",
+    "openai/gpt-6.1-sol",
     "openai/gpt-6-sol",
     "openai/gpt-6-luna",
     "openai/gpt-5.6-sol",
@@ -89,10 +90,12 @@ BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "xai/grok-4.5",
     "minimax/minimax-m2.7",
     "minimax/minimax-m3",
+    "qwen/qwen3.8-max",
     "qwen/qwen3.7-max",
     "qwen/qwen3.7-plus",
     "qwen/qwen3.7-flash",
     "qwen/qwen3.8-flash",
+    "tencent/hy4-preview",
     "xiaomi/mimo-v2.5",
     "xiaomi/mimo-v2.5-pro",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -101,6 +104,9 @@ BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "nvidia/nemotron-3-ultra-550b",
     "cohere/north-mini-code",
     "poolside/laguna-xs-2.1",
+    "poolside/laguna-s-2.1",
+    "mistral/mistral-large-4",
+    "nvidia/muse-glimmer-30b",
     "openai/gpt-image-1",
     "openai/gpt-image-2",
     "openai/gpt-image-2.5-flare",

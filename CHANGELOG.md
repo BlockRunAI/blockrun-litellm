@@ -4,6 +4,10 @@
 
 ### Changed
 
+- **Catalog snapshot refreshed to 2026-10-19.** Adds the six ids the gateway
+  has listed since 2026-10-02: `openai/gpt-6.1-sol`, `mistral/mistral-large-4`,
+  `qwen/qwen3.8-max`, `tencent/hy4-preview`, `poolside/laguna-s-2.1` and
+  `nvidia/muse-glimmer-30b` (115 ids). Nothing was retired in that window.
 - **Catalog snapshot refreshed to 2026-10-02.** `model_ids()` /
   `is_known_model()` now know GPT-6 Astra / Sol / Luna, GPT-5.1, Claude
   Fable 5.1, Claude Opus 5.5, Claude Sonnet 5.5, Grok 4.6 and Grok 4.7, plus the
