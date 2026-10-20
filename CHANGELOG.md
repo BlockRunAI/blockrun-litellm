@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 — 2026-10-20
 
 ### Changed
 
+- **Catalog snapshot refreshed to 2026-10-20.** Adds
+  `deepseek/deepseek-v4.1-flash` (116 ids), the gateway's own id for DeepSeek
+  V4.1 Flash. `deepseek/deepseek-chat` and `deepseek/deepseek-reasoner` remain
+  as compatibility ids served by the same model.
 - **Catalog snapshot refreshed to 2026-10-19.** Adds the six ids the gateway
   has listed since 2026-10-02: `openai/gpt-6.1-sol`, `mistral/mistral-large-4`,
   `qwen/qwen3.8-max`, `tencent/hy4-preview`, `poolside/laguna-s-2.1` and

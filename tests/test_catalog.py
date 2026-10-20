@@ -9,7 +9,7 @@ from blockrun_litellm.catalog import (
 
 
 def test_model_catalog_matches_live_snapshot() -> None:
-    assert len(BLOCKRUN_MODEL_IDS) == 115
+    assert len(BLOCKRUN_MODEL_IDS) == 116
     assert len(set(BLOCKRUN_MODEL_IDS)) == len(BLOCKRUN_MODEL_IDS)
     assert all(mid.count("/") == 1 and mid.strip() == mid for mid in BLOCKRUN_MODEL_IDS)
     assert "anthropic/claude-opus-5" in BLOCKRUN_MODEL_IDS
@@ -59,6 +59,14 @@ def test_catalog_helpers_accept_custom_provider_prefix() -> None:
     assert is_known_model("anthropic/claude-opus-5")
     assert is_known_model("blockrun/anthropic/claude-opus-5")
     assert not is_known_model("anthropic/not-a-real-model")
+
+
+def test_catalog_lists_deepseek_v41_flash() -> None:
+    # 2026-10-20: the gateway lists DeepSeek V4.1 Flash under its own id;
+    # deepseek-chat / deepseek-reasoner stay as compatibility ids.
+    assert is_known_model("deepseek/deepseek-v4.1-flash")
+    assert is_known_model("deepseek/deepseek-chat")
+    assert not is_known_model("nvidia/deepseek-v4-flash")
 
 
 def test_snapshot_date_is_iso_dated() -> None:
