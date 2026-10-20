@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.3 — 2026-10-20
+
+### Added
+
+- **Catalog adds `google/gemini-4-argon`.** Google's frontier reasoning model
+  (1M context, 65,536 max output, reasoning + vision + tools), live on the
+  gateway on Base and Solana since 2026-10-20. The bundled snapshot again
+  matches `GET /api/v1/models` id-for-id and in order. Callers never needed an
+  upgrade to *call* it; this only adds it to `BLOCKRUN_MODEL_IDS` for
+  allowlists and pickers.
+
 ## 0.10.2 — 2026-10-20
 
 ### Fixed

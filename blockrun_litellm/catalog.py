@@ -62,6 +62,7 @@ BLOCKRUN_MODEL_IDS: Tuple[str, ...] = (
     "anthropic/claude-opus-4.8",
     "anthropic/claude-opus-5",
     "anthropic/claude-opus-5.5",
+    "google/gemini-4-argon",
     "google/gemini-3.1-pro",
     "google/gemini-3-flash-preview",
     "google/gemini-3.8-flash",
